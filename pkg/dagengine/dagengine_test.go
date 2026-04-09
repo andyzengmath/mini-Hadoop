@@ -242,14 +242,14 @@ func TestDAGScheduler_StageCount(t *testing.T) {
 		t.Errorf("expected at least 2 stages (shuffle boundary), got %d", len(stages))
 	}
 
-	// Verify at least one stage has IsShffle=true
-	hasShufle := false
+	// Verify at least one stage has IsShuffle=true
+	hasShuffle := false
 	for _, s := range stages {
-		if s.IsShffle {
-			hasShufle = true
+		if s.IsShuffle {
+			hasShuffle = true
 		}
 	}
-	if !hasShufle {
+	if !hasShuffle {
 		t.Error("expected at least one shuffle stage")
 	}
 }

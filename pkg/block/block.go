@@ -9,8 +9,7 @@ import (
 )
 
 const (
-	DefaultBlockSize = 128 * 1024 * 1024 // 128 MB
-	ChecksumSize     = sha256.Size        // 32 bytes
+	ChecksumSize = sha256.Size // 32 bytes (SHA-256)
 )
 
 // ID uniquely identifies a block.
