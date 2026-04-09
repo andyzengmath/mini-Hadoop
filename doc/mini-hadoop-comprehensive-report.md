@@ -162,16 +162,265 @@ Hadoop follows a master-worker topology with three primary layers:
 
 5. **Shuffle as the bottleneck**: The MapReduce shuffle phase (all-to-all network exchange between mappers and reducers) is the most performance-critical and complex component.
 
-### 3.3 Critical Data Flows (6 core flows identified)
+### 3.3 Critical Data Flows (6 core flows with diagrams)
 
-| # | Flow | Path |
-|---|------|------|
-| 1 | File Write | Client → NameNode (create + block alloc) → DataNode pipeline → NameNode (complete) |
-| 2 | File Read | Client → NameNode (block locations) → nearest DataNode → streaming read |
-| 3 | Heartbeat | DataNode → NameNode (every 3s); NodeManager → ResourceManager (every 3s) |
-| 4 | Block Report | DataNode → NameNode (periodic full block inventory) |
-| 5 | Job Submission | Client → RM → AM container → AM requests map/reduce containers with locality |
-| 6 | MapReduce | Split → map (data-local) → sort → spill → shuffle → merge-sort → reduce → HDFS output |
+#### Flow 1: HDFS File Write (Pipeline Replication)
+
+```
+ Client                  NameNode                 DN1              DN2              DN3
+   │                        │                      │                │                │
+   │── CreateFile(path) ───>│                      │                │                │
+   │<── OK ────────────────│                      │                │                │
+   │                        │                      │                │                │
+   │── AddBlock(path) ────>│                      │                │                │
+   │                        │─ select 3 DNs ──>   │                │                │
+   │                        │  (by capacity)       │                │                │
+   │<── blockID, pipeline ──│  [DN1, DN2, DN3]    │                │                │
+   │                        │                      │                │                │
+   │══ WriteBlock(header) ═══════════════════════>│                │                │
+   │                        │                      │═ header ══════>│                │
+   │                        │                      │                │═ header ══════>│
+   │── chunk[0] (1MB) ────────────────────────────>│                │                │
+   │                        │                      │─ write disk    │                │
+   │                        │                      │── chunk[0] ───>│                │
+   │                        │                      │                │─ write disk    │
+   │                        │                      │                │── chunk[0] ───>│
+   │── chunk[1] ──────────────────────────────────>│                │                │
+   │   ...                  │                      │   ...          │   ...          │
+   │── chunk[N] (isLast) ─────────────────────────>│                │                │
+   │                        │                      │── chunk[N] ───>│── chunk[N] ───>│
+   │<══ WriteBlockResponse ═══════════════════════│<══ response ═══│<══ response ═══│
+   │                        │                      │                │                │
+   │── CompleteFile ───────>│                      │                │                │
+   │<── OK ────────────────│  (block map updated) │                │                │
+```
+
+#### Flow 2: HDFS File Read (Data-Local with Failover)
+
+```
+ Client                  NameNode                 DN1              DN2              DN3
+   │                        │                      │                │                │
+   │── GetBlockLocations ──>│                      │                │                │
+   │                        │─ sort by proximity   │                │                │
+   │<── blocks: [          │  to client            │                │                │
+   │     {blk1: [DN1,DN2,DN3]},                    │                │                │
+   │     {blk2: [DN2,DN3,DN1]},                    │                │                │
+   │     ...]              │                      │                │                │
+   │                        │                      │                │                │
+   │  For each block:       │                      │                │                │
+   │── ReadBlock(blk1) ──────────────────────────>│ (nearest)      │                │
+   │<── stream chunks ───────────────────────────│                │                │
+   │  verify checksum       │                      │                │                │
+   │                        │                      │                │                │
+   │── ReadBlock(blk2) ────────────────────────────────────────────>│ (nearest)      │
+   │<── stream chunks ─────────────────────────────────────────────│                │
+   │  verify checksum       │                      │                │                │
+   │                        │                      │                │                │
+   │  If DN fails mid-read: │                      │                │                │
+   │── ReadBlock(blk2) ──────────────────────────────────────────────────────────────>│
+   │<── stream chunks ─────────────────────────────────────────────────────────────│
+   │  (failover to next replica)                   │                │                │
+```
+
+#### Flow 3: Heartbeat & Fault Detection
+
+```
+ DataNode               NameNode                          Action
+   │                        │
+   │── heartbeat ──────────>│  (every 3 seconds)
+   │<── commands[] ────────│  (piggyback: REPLICATE, DELETE)
+   │                        │
+   │── heartbeat ──────────>│
+   │<── [] ────────────────│
+   │                        │
+   │   ╳ (node dies)        │
+   │                        │  ... 10 seconds pass ...
+   │                        │
+   │                        │─── DetectDeadNodes()
+   │                        │    mark DN as DEAD
+   │                        │    remove from block locations
+   │                        │
+   │                        │─── CheckAndReplicateBlocks()
+   │                        │    scan all blocks
+   │                        │    find under-replicated: blk1 (2/3 replicas)
+   │                        │    schedule REPLICATE command
+   │                        │
+   │                        │    On next heartbeat from healthy DN:
+   │                        │──── {REPLICATE, blk1, source=DN2} ──> Healthy DN
+   │                        │                                         │
+   │                        │                                         │── ReadBlock(blk1) ──> DN2
+   │                        │                                         │<── stream data ──────│
+   │                        │                                         │── write to local disk
+   │                        │                                         │
+   │                        │<── block report (includes blk1) ────────│
+   │                        │    blk1 now has 3/3 replicas ✓
+```
+
+#### Flow 4: Block Report & Reconciliation
+
+```
+ DataNode               NameNode
+   │                        │
+   │── BlockReport ────────>│  (every 30 seconds)
+   │   [blk1: 128MB, gen=1] │
+   │   [blk2: 128MB, gen=1] │
+   │   [blk3: 64MB,  gen=1] │
+   │   [blk_orphan: gen=0]  │
+   │                        │
+   │                        │─── For each reported block:
+   │                        │    blk1: known, gen matches → update location
+   │                        │    blk2: known, gen matches → update location
+   │                        │    blk3: known, gen matches → update location
+   │                        │    blk_orphan: unknown → mark for deletion
+   │                        │
+   │<── {delete: [blk_orphan]} │
+   │                        │
+   │── delete blk_orphan    │
+   │   from local disk      │
+```
+
+#### Flow 5: Job Submission & Container Allocation
+
+```
+ Client              ResourceManager          NodeManager         ApplicationMaster
+   │                        │                      │                      │
+   │── SubmitApplication ──>│                      │                      │
+   │   {type: "mapreduce",  │                      │                      │
+   │    am_binary: "mrapp", │                      │                      │
+   │    am_args: [...]}     │                      │                      │
+   │                        │─── allocate AM       │                      │
+   │                        │    container (FIFO)  │                      │
+   │                        │                      │                      │
+   │                        │── LaunchContainer ──>│                      │
+   │                        │   {cmd: "mrapp"}     │── start process ────>│
+   │<── app_id ────────────│                      │                      │
+   │                        │                      │                      │
+   │                        │                      │                      │── ComputeSplits()
+   │                        │                      │                      │   query NameNode
+   │                        │                      │                      │   for block locations
+   │                        │                      │                      │
+   │                        │<── AllocateContainers ──────────────────────│
+   │                        │   {locality: [DN1],  │                      │
+   │                        │    count: N}         │                      │
+   │                        │─── match locality ──>│                      │
+   │                        │    prefer data-local  │                      │
+   │                        │── containers[] ─────────────────────────────>│
+   │                        │                      │                      │
+   │                        │                      │<── LaunchContainer ──│
+   │                        │                      │   {cmd: "map-task"}  │
+   │                        │                      │── start process      │
+   │                        │                      │                      │
+   │── GetApplicationReport>│                      │                      │
+   │<── {state: RUNNING,   │                      │                      │
+   │     progress: 0.5}    │                      │                      │
+```
+
+#### Flow 6: MapReduce Execution Pipeline
+
+```
+ ┌─────────────────────────────────────────────────────────────────────────────────────┐
+ │                              MapReduce Job Execution                                 │
+ │                                                                                      │
+ │  INPUT (HDFS)          MAP PHASE                SHUFFLE           REDUCE PHASE       │
+ │                                                                                      │
+ │  ┌──────────┐    ┌─────────────────┐                         ┌──────────────────┐   │
+ │  │ Block 1  │───>│ Map Task 0      │──┐                   ┌─>│ Reduce Task 0    │   │
+ │  │ (128 MB) │    │ [data-local!]   │  │                   │  │ merge-sort       │   │
+ │  └──────────┘    │                 │  │    ┌───────────┐  │  │ group by key     │   │
+ │                  │ mapper(k,v)     │  ├───>│ Partition 0│──┘  │ reducer(k,vals)  │   │
+ │                  │   ↓             │  │    └───────────┘     │   ↓              │   │
+ │                  │ sort buffer     │  │    ┌───────────┐     │ output to HDFS   │   │
+ │                  │ (64MB, spill    │  └───>│ Partition 1│──┐  └──────────────────┘   │
+ │                  │  at 80%)        │       └───────────┘  │                          │
+ │                  └─────────────────┘                      │  ┌──────────────────┐   │
+ │                                                           └─>│ Reduce Task 1    │   │
+ │  ┌──────────┐    ┌─────────────────┐                      ┌─>│ merge-sort       │   │
+ │  │ Block 2  │───>│ Map Task 1      │──┐                   │  │ group by key     │   │
+ │  │ (128 MB) │    │ [data-local!]   │  │    ┌───────────┐  │  │ reducer(k,vals)  │   │
+ │  └──────────┘    │                 │  ├───>│ Partition 0│──┘  │   ↓              │   │
+ │                  │ mapper(k,v)     │  │    └───────────┘     │ output to HDFS   │   │
+ │                  │   ↓             │  │    ┌───────────┐     └──────────────────┘   │
+ │                  │ sort buffer     │  └───>│ Partition 1│──┐                         │
+ │                  │   ↓             │       └───────────┘  │       OUTPUT (HDFS)      │
+ │                  │ spill to disk   │                      │  ┌──────────────────┐   │
+ │                  │   ↓             │                      └─>│ part-00000       │   │
+ │                  │ merge partitions│                         │ part-00001       │   │
+ │                  └─────────────────┘                         └──────────────────┘   │
+ │                                                                                      │
+ │  Key: ──> data flow    [data-local!] = task on same node as block                   │
+ │       ═══> pipeline     Partition N  = hash(key) % numReducers                      │
+ └─────────────────────────────────────────────────────────────────────────────────────┘
+
+ Sort/Spill Detail (per Map Task):
+ ┌─────────────────────────────────────────────────────────┐
+ │  mapper output → In-Memory Buffer (64 MB)               │
+ │                        │                                 │
+ │                  at 80% capacity:                        │
+ │                        │                                 │
+ │                  sort by (partition, key)                │
+ │                        │                                 │
+ │                  spill to disk ──> spill-0.dat           │
+ │                                    spill-1.dat           │
+ │                                    spill-2.dat           │
+ │                        │                                 │
+ │                  after all input:                        │
+ │                        │                                 │
+ │                  merge all spills ──> partition-0.dat    │
+ │                  (per-partition)       partition-1.dat    │
+ └─────────────────────────────────────────────────────────┘
+
+ Shuffle Detail (per Reduce Task):
+ ┌─────────────────────────────────────────────────────────┐
+ │  Reducer contacts ALL mapper nodes:                      │
+ │                                                          │
+ │  Mapper Node 1 ──(partition-N.dat)──┐                   │
+ │  Mapper Node 2 ──(partition-N.dat)──┼──> Merge-Sort     │
+ │  Mapper Node 3 ──(partition-N.dat)──┘    (min-heap)     │
+ │                                              │           │
+ │                                     grouped (key, [vals])│
+ │                                              │           │
+ │                                     reducer(key, vals)   │
+ │                                              │           │
+ │                                     output to HDFS       │
+ └─────────────────────────────────────────────────────────┘
+```
+
+#### Flow 7: Failure Recovery (Fault Tolerance)
+
+```
+ SCENARIO A: DataNode dies after file write
+ ┌────────────────────────────────────────────────────────────────────┐
+ │  Normal state: Block X replicated on [DN1, DN2, DN3]              │
+ │                                                                    │
+ │  1. DN2 crashes ╳                                                  │
+ │  2. NameNode: no heartbeat from DN2 for 10s                       │
+ │  3. NameNode: mark DN2 DEAD                                       │
+ │  4. NameNode: Block X locations → [DN1, DN3] (2/3 replicas)      │
+ │  5. NameNode: schedule REPLICATE(Block X, source=DN1, target=DN4)│
+ │  6. DN4 heartbeat → receives REPLICATE command                    │
+ │  7. DN4: ReadBlock(X) from DN1 → write locally                   │
+ │  8. DN4: block report → NameNode confirms Block X on DN4         │
+ │  9. Block X locations → [DN1, DN3, DN4] (3/3 replicas) ✓        │
+ └────────────────────────────────────────────────────────────────────┘
+
+ SCENARIO B: Worker dies during MapReduce job
+ ┌────────────────────────────────────────────────────────────────────┐
+ │  Normal state: Map Task 2 running on Worker-2                      │
+ │                                                                    │
+ │  1. Worker-2 crashes ╳                                             │
+ │  2. MRAppMaster: GetContainerStatus → connection refused           │
+ │  3. MRAppMaster: mark Map Task 2 as FAILED (attempt 1/3)         │
+ │  4. MRAppMaster: AllocateContainers(locality=[DN1,DN3])           │
+ │  5. RM: allocate container on Worker-1 (has the data block)       │
+ │  6. MRAppMaster: LaunchContainer(Map Task 2) on Worker-1          │
+ │  7. Map Task 2 re-executes successfully (attempt 2/3)             │
+ │  8. If reducer was fetching Map Task 2's output from Worker-2:    │
+ │     a. Reducer: ReportShuffleFetchFailure to AM                   │
+ │     b. AM: provides new location (Worker-1)                       │
+ │     c. Reducer: re-fetches from Worker-1                          │
+ │  9. Job completes successfully ✓                                  │
+ └────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
