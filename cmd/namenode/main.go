@@ -36,7 +36,10 @@ func main() {
 
 	// Create NameNode server
 	nn := namenode.NewServer(cfg)
-	nn.Start()
+	if err := nn.Start(); err != nil {
+		slog.Error("failed to start NameNode", "error", err)
+		os.Exit(1)
+	}
 
 	// Create gRPC server
 	grpcServer := rpc.NewServer(rpc.ServerConfig{Port: cfg.NameNodePort})

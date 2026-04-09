@@ -14,7 +14,7 @@ PROTO_DIR=proto
 PROTO_OUT=proto
 
 # All binaries
-BINARIES=namenode datanode resourcemanager nodemanager hdfs mapreduce
+BINARIES=namenode datanode resourcemanager nodemanager hdfs mapreduce mapworker
 
 # Build all binaries
 build: $(addprefix $(BINARY_DIR)/,$(BINARIES))

@@ -33,7 +33,10 @@ func main() {
 	}
 
 	rm := resourcemanager.NewServer(cfg)
-	rm.Start()
+	if err := rm.Start(); err != nil {
+		slog.Error("failed to start ResourceManager", "error", err)
+		os.Exit(1)
+	}
 
 	grpcServer := rpc.NewServer(rpc.ServerConfig{Port: cfg.ResourceManagerPort})
 	pb.RegisterResourceManagerServiceServer(grpcServer, rm)

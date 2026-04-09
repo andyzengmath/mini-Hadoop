@@ -7,7 +7,7 @@ services:
       dockerfile: docker/Dockerfile
     command: namenode --port 9000
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
     volumes:
       - nn-data:/data/namenode
     environment:
@@ -29,7 +29,7 @@ services:
       dockerfile: docker/Dockerfile
     command: resourcemanager --port 9010
     ports:
-      - "9010:9010"
+      - "127.0.0.1:9010:9010"
     environment:
       - MINIHADOOP_RM_HOST=resourcemanager
       - MINIHADOOP_RM_PORT=9010

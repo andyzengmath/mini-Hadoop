@@ -15,7 +15,8 @@ RUN CGO_ENABLED=0 go build -o /bin/namenode ./cmd/namenode && \
     CGO_ENABLED=0 go build -o /bin/resourcemanager ./cmd/resourcemanager && \
     CGO_ENABLED=0 go build -o /bin/nodemanager ./cmd/nodemanager && \
     CGO_ENABLED=0 go build -o /bin/hdfs ./cmd/hdfs && \
-    CGO_ENABLED=0 go build -o /bin/mapreduce ./cmd/mapreduce
+    CGO_ENABLED=0 go build -o /bin/mapreduce ./cmd/mapreduce && \
+    CGO_ENABLED=0 go build -o /bin/mapworker ./cmd/mapworker
 
 # --- Runtime image ---
 FROM alpine:3.20
@@ -28,6 +29,7 @@ COPY --from=builder /bin/resourcemanager /usr/local/bin/
 COPY --from=builder /bin/nodemanager /usr/local/bin/
 COPY --from=builder /bin/hdfs /usr/local/bin/
 COPY --from=builder /bin/mapreduce /usr/local/bin/
+COPY --from=builder /bin/mapworker /usr/local/bin/
 
 # Create non-root user
 RUN adduser -D -u 1001 hadoop

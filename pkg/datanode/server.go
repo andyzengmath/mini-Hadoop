@@ -122,7 +122,9 @@ func (s *Server) sendHeartbeat() {
 func (s *Server) executeCommand(cmd *pb.BlockCommand) {
 	switch cmd.Type {
 	case pb.CommandType_REPLICATE:
-		s.replicateBlock(cmd.BlockId, cmd.SourceNode)
+		if err := s.replicateBlock(cmd.BlockId, cmd.SourceNode); err != nil {
+			slog.Error("replicate command failed", "blockID", cmd.BlockId, "error", err)
+		}
 	case pb.CommandType_DELETE:
 		if err := s.storage.DeleteBlock(cmd.BlockId); err != nil {
 			slog.Error("delete command failed", "blockID", cmd.BlockId, "error", err)
@@ -130,13 +132,12 @@ func (s *Server) executeCommand(cmd *pb.BlockCommand) {
 	}
 }
 
-func (s *Server) replicateBlock(blockID, sourceAddr string) {
+func (s *Server) replicateBlock(blockID, sourceAddr string) error {
 	slog.Info("replicating block", "blockID", blockID, "source", sourceAddr)
 
 	conn, err := rpc.Dial(sourceAddr)
 	if err != nil {
-		slog.Error("connect to source for replication", "error", err)
-		return
+		return fmt.Errorf("connect to source for replication: %w", err)
 	}
 	defer conn.Close()
 
@@ -145,8 +146,7 @@ func (s *Server) replicateBlock(blockID, sourceAddr string) {
 		BlockId: blockID,
 	})
 	if err != nil {
-		slog.Error("read block for replication", "error", err)
-		return
+		return fmt.Errorf("read block for replication: %w", err)
 	}
 
 	var buf bytes.Buffer
@@ -156,19 +156,18 @@ func (s *Server) replicateBlock(blockID, sourceAddr string) {
 			break
 		}
 		if err != nil {
-			slog.Error("receive chunk for replication", "error", err)
-			return
+			return fmt.Errorf("receive chunk for replication: %w", err)
 		}
 		buf.Write(chunk.Data)
 	}
 
 	_, _, err = s.storage.WriteBlock(blockID, 1, &buf)
 	if err != nil {
-		slog.Error("write replicated block", "error", err)
-		return
+		return fmt.Errorf("write replicated block: %w", err)
 	}
 
 	slog.Info("block replicated successfully", "blockID", blockID)
+	return nil
 }
 
 // blockReportLoop sends periodic block reports to the NameNode.
@@ -379,6 +378,8 @@ func (s *Server) DeleteBlock(_ context.Context, req *pb.DeleteBlockRequest) (*pb
 }
 
 func (s *Server) TransferBlock(_ context.Context, req *pb.TransferBlockRequest) (*pb.TransferBlockResponse, error) {
-	s.replicateBlock(req.BlockId, req.SourceAddress)
+	if err := s.replicateBlock(req.BlockId, req.SourceAddress); err != nil {
+		return &pb.TransferBlockResponse{Success: false, Error: err.Error()}, nil
+	}
 	return &pb.TransferBlockResponse{Success: true}, nil
 }

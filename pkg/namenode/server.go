@@ -32,10 +32,11 @@ func NewServer(cfg config.Config) *Server {
 }
 
 // Start begins background goroutines for heartbeat monitoring and re-replication.
-func (s *Server) Start() {
+func (s *Server) Start() error {
 	go s.heartbeatMonitor()
 	go s.metadataDumper()
 	slog.Info("NameNode background tasks started")
+	return nil
 }
 
 // Stop halts background goroutines and saves state.
@@ -236,6 +237,7 @@ func (s *Server) RegisterDataNode(_ context.Context, req *pb.RegisterDataNodeReq
 func (s *Server) Heartbeat(_ context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
 	cmds, err := s.bm.ProcessHeartbeat(req.NodeId, req.UsedBytes, req.AvailableBytes, req.NumBlocks)
 	if err != nil {
+		slog.Warn("heartbeat processing failed", "nodeID", req.NodeId, "error", err)
 		return &pb.HeartbeatResponse{}, nil
 	}
 
