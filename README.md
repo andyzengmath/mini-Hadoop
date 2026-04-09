@@ -179,18 +179,146 @@ mini-hadoop/
 | pkg/resourcemanager | 16 | FIFO scheduler, queues, locality |
 | test/acceptance | 7 | File I/O, replication, WordCount, shuffle |
 
-## Docker Cluster Verification
+## Manual Testing (10/10 PASS)
 
-| Test | Result |
-|------|--------|
-| AC-1: File Write/Read (67MB, SHA-256) | PASS |
-| AC-2: Replication Recovery (worker killed, 11s detection) | PASS |
-| AC-3: WordCount (3.6M words, matches reference) | PASS |
-| AC-6: SumByKey (10K keys, all sums correct) | PASS |
-| AC-7: Throughput Baseline | PASS |
-| Distributed MapReduce (2 reducers, 100K words) | PASS |
-| NameNode metrics dashboard | PASS |
-| ResourceManager metrics dashboard | PASS |
+Verified on Windows 11 + Docker Desktop 29.3.1 with a fresh 3-node cluster. See [full sample run output](doc/manual-testing-guide_sample_run.md).
+
+| # | Test | What it proves | Result |
+|---|------|---------------|--------|
+| 1 | Cluster Health | 6 services running, metrics dashboards | PASS |
+| 2 | Create Directories | Namespace operations | PASS |
+| 3 | Small File Upload/Download | Basic write/read pipeline | PASS |
+| 4 | Large File + SHA-256 | 27MB data integrity across chunks | PASS |
+| 5 | Kill Worker Node | Fault tolerance — file readable after death | PASS |
+| 6 | WordCount MapReduce | Map → sort → reduce pipeline (23 words) | PASS |
+| 7 | Distributed Mapworker | 2-reducer partitioned shuffle (6000 words) | PASS |
+| 8 | File Operations | Delete, list, info commands | PASS |
+| 9 | Metrics Dashboard | JSON /metrics + /health endpoints | PASS |
+| 10 | SumByKey Job | Generic MapReduce (electronics=650) | PASS |
+
+To run the tests yourself, follow [doc/manual-testing-guide.md](doc/manual-testing-guide.md).
+
+## Run on Multiple Machines
+
+mini-Hadoop can run across real separate machines (not just Docker on one host).
+
+### Prerequisites
+- All machines can reach each other over the network (TCP ports 9000-9011)
+- Go 1.23+ installed on all machines, OR copy pre-built binaries
+- Shared config: all workers know the NameNode and ResourceManager addresses
+
+### Step 1: Build binaries
+
+```bash
+# On your build machine
+make build
+# Produces: bin/namenode, bin/datanode, bin/resourcemanager, bin/nodemanager, bin/hdfs, bin/mapreduce, bin/mapworker
+```
+
+Copy `bin/*` to all machines, or build on each machine.
+
+### Step 2: Start master services
+
+On **Machine A** (master node):
+```bash
+# Set hostname so workers can reach this machine
+export MINIHADOOP_HOSTNAME=machine-a.local
+
+# Start NameNode (port 9000) + dashboard (port 9100)
+./bin/namenode --port 9000 &
+
+# Start ResourceManager (port 9010) + dashboard (port 9110)
+./bin/resourcemanager --port 9010 &
+
+echo "Master services running on machine-a.local"
+```
+
+### Step 3: Start workers
+
+On **Machine B** (worker 1):
+```bash
+export MINIHADOOP_HOSTNAME=machine-b.local
+export MINIHADOOP_NAMENODE_HOST=machine-a.local
+export MINIHADOOP_NAMENODE_PORT=9000
+export MINIHADOOP_RM_HOST=machine-a.local
+export MINIHADOOP_RM_PORT=9010
+
+# Start DataNode + NodeManager
+./bin/datanode --id worker-1 --port 9001 &
+./bin/nodemanager --id worker-1 --port 9011 &
+```
+
+On **Machine C** (worker 2):
+```bash
+export MINIHADOOP_HOSTNAME=machine-c.local
+export MINIHADOOP_NAMENODE_HOST=machine-a.local
+export MINIHADOOP_NAMENODE_PORT=9000
+export MINIHADOOP_RM_HOST=machine-a.local
+export MINIHADOOP_RM_PORT=9010
+
+./bin/datanode --id worker-2 --port 9001 &
+./bin/nodemanager --id worker-2 --port 9011 &
+```
+
+On **Machine D** (worker 3):
+```bash
+export MINIHADOOP_HOSTNAME=machine-d.local
+export MINIHADOOP_NAMENODE_HOST=machine-a.local
+export MINIHADOOP_NAMENODE_PORT=9000
+export MINIHADOOP_RM_HOST=machine-a.local
+export MINIHADOOP_RM_PORT=9010
+
+./bin/datanode --id worker-3 --port 9001 &
+./bin/nodemanager --id worker-3 --port 9011 &
+```
+
+### Step 4: Use the cluster
+
+From **any machine** with network access to the master:
+```bash
+export MINIHADOOP_NAMENODE_HOST=machine-a.local
+export MINIHADOOP_RM_HOST=machine-a.local
+
+# HDFS operations
+./bin/hdfs mkdir /data
+./bin/hdfs put ./local-file.txt /data/file.txt
+./bin/hdfs get /data/file.txt ./downloaded.txt
+
+# MapReduce
+./bin/mapreduce --job wordcount --input ./input.txt --output ./output --local
+
+# Check dashboards
+curl http://machine-a.local:9100/metrics   # NameNode
+curl http://machine-a.local:9110/metrics   # ResourceManager
+```
+
+### Network Topology
+
+```
+Machine A (master)          Machine B (worker-1)
+┌──────────────────┐       ┌──────────────────┐
+│ NameNode :9000   │◄─────►│ DataNode :9001   │
+│ RM       :9010   │◄─────►│ NodeManager:9011 │
+│ Dashboard:9100   │       └──────────────────┘
+│ Dashboard:9110   │
+└──────────────────┘       Machine C (worker-2)
+        ▲                  ┌──────────────────┐
+        ├─────────────────►│ DataNode :9001   │
+        │                  │ NodeManager:9011 │
+        │                  └──────────────────┘
+        │
+        │                  Machine D (worker-3)
+        │                  ┌──────────────────┐
+        └─────────────────►│ DataNode :9001   │
+                           │ NodeManager:9011 │
+                           └──────────────────┘
+```
+
+### Tips for Multi-Machine Deployment
+- **Firewall:** Ensure ports 9000-9011 and 9100-9110 are open between all machines
+- **DNS/Hosts:** Each machine must be resolvable by hostname. Use `/etc/hosts` if no DNS
+- **Data directories:** Each worker stores blocks at `MINIHADOOP_DATA_DIR` (default `/tmp/minihadoop/datanode`). Use a dedicated disk for production
+- **Scaling:** Add more workers by repeating Step 3 on additional machines with unique `--id` values
 
 ## Configuration
 
@@ -202,13 +330,16 @@ mini-hadoop/
 | `MINIHADOOP_RM_PORT` | 9010 | ResourceManager gRPC port |
 | `MINIHADOOP_HOSTNAME` | os.Hostname() | Service registration hostname |
 | `MINIHADOOP_DATA_DIR` | /tmp/minihadoop/datanode | Block storage directory |
+| `MINIHADOOP_METADATA_DIR` | /tmp/minihadoop/namenode | NameNode state directory |
 | `MINIHADOOP_TEMP_DIR` | /tmp/minihadoop/temp | Temporary files |
 
 ## Documentation
 
-- **[Comprehensive Technical Report](doc/mini-hadoop-comprehensive-report.md)** — Full architecture analysis, data flow diagrams, algorithms, verification results
-- **[Phase 2 Implementation Plan](doc/phase2-plan.md)** — Detailed specs for all advanced features
-- **[Next Stage Plan](doc/next-stage-plan.md)** — Original roadmap from Phase 1
+- **[Manual Testing Guide](doc/manual-testing-guide.md)** — 10 step-by-step tests for verifying all features
+- **[Sample Run Output](doc/manual-testing-guide_sample_run.md)** — Verified test output (10/10 PASS)
+- **[Comprehensive Technical Report](doc/mini-hadoop-comprehensive-report.md)** — Full architecture analysis, data flow diagrams, algorithms
+- **[Integration Plan](doc/integration-plan.md)** — How to wire library-only features into servers
+- **[Phase 2 Implementation Plan](doc/phase2-plan.md)** — Detailed specs for advanced features
 
 ## Design Decisions
 
