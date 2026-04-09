@@ -14,9 +14,11 @@ import (
 type Server struct {
 	pb.UnimplementedNameNodeServiceServer
 
-	ns  *Namespace
-	bm  *BlockManager
-	cfg config.Config
+	ns       *Namespace
+	bm       *BlockManager
+	cfg      config.Config
+	editLog  *EditLog
+	election *LeaderElection
 
 	stopCh chan struct{}
 }
@@ -33,19 +35,52 @@ func NewServer(cfg config.Config) *Server {
 
 // Start begins background goroutines for heartbeat monitoring and re-replication.
 func (s *Server) Start() error {
+	// Initialize edit log (WAL)
+	el, err := NewEditLog(s.cfg.MetadataDir)
+	if err != nil {
+		return err
+	}
+	s.editLog = el
+
+	// Initialize leader election (local backend for single-node)
+	backend := NewLocalBackend()
+	s.election = NewLeaderElection("namenode-1", backend,
+		func() { slog.Info("NameNode became ACTIVE") },
+		func() { slog.Warn("NameNode lost leadership") },
+	)
+	s.election.Start()
+
 	go s.heartbeatMonitor()
 	go s.metadataDumper()
-	slog.Info("NameNode background tasks started")
+	slog.Info("NameNode background tasks started",
+		"editlog_seq", s.editLog.GetSequence(),
+		"role", s.election.GetRole(),
+	)
 	return nil
 }
 
 // Stop halts background goroutines and saves state.
 func (s *Server) Stop() {
 	close(s.stopCh)
+	if s.election != nil {
+		s.election.Stop()
+	}
+	if s.editLog != nil {
+		s.editLog.Close()
+	}
 	if err := SaveState(s.ns, s.bm, s.cfg.MetadataDir); err != nil {
 		slog.Error("failed to save state on shutdown", "error", err)
 	}
 	slog.Info("NameNode stopped")
+}
+
+// logEdit appends a mutation to the edit log (WAL). Non-fatal if edit log is nil.
+func (s *Server) logEdit(op EditOp, path string, data interface{}) {
+	if s.editLog != nil {
+		if _, err := s.editLog.Append(op, path, data); err != nil {
+			slog.Error("edit log append failed", "op", op, "path", path, "error", err)
+		}
+	}
 }
 
 // heartbeatMonitor periodically checks for dead DataNodes and triggers re-replication.
@@ -134,6 +169,7 @@ func (s *Server) CreateFile(_ context.Context, req *pb.CreateFileRequest) (*pb.C
 		return &pb.CreateFileResponse{Success: false, Error: err.Error()}, nil
 	}
 
+	s.logEdit(OpCreateFile, req.Path, map[string]interface{}{"replication": replication})
 	slog.Info("file created", "path", req.Path, "replication", replication)
 	return &pb.CreateFileResponse{Success: true}, nil
 }
@@ -198,6 +234,7 @@ func (s *Server) CompleteFile(_ context.Context, req *pb.CompleteFileRequest) (*
 		return &pb.CompleteFileResponse{Success: false, Error: err.Error()}, nil
 	}
 
+	s.logEdit(OpCompleteFile, req.Path, map[string]interface{}{"blocks": req.BlockIds, "size": totalSize})
 	slog.Info("file completed", "path", req.Path, "blocks", len(req.BlockIds), "size", totalSize)
 	return &pb.CompleteFileResponse{Success: true}, nil
 }
@@ -212,6 +249,7 @@ func (s *Server) DeleteFile(_ context.Context, req *pb.DeleteFileRequest) (*pb.D
 		s.bm.RemoveBlock(id)
 	}
 
+	s.logEdit(OpDeleteFile, req.Path, nil)
 	slog.Info("file deleted", "path", req.Path, "blocks_removed", len(blockIDs))
 	return &pb.DeleteFileResponse{Success: true}, nil
 }
@@ -241,6 +279,7 @@ func (s *Server) MkDir(_ context.Context, req *pb.MkDirRequest) (*pb.MkDirRespon
 	if err := s.ns.MkDir(req.Path, req.CreateParents); err != nil {
 		return &pb.MkDirResponse{Success: false, Error: err.Error()}, nil
 	}
+	s.logEdit(OpMkDir, req.Path, nil)
 	return &pb.MkDirResponse{Success: true}, nil
 }
 

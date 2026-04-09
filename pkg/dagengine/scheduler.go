@@ -14,7 +14,7 @@ type Stage struct {
 	ID       string
 	RDD      *RDD
 	Parents  []*Stage
-	IsShffle bool // True if this stage's input requires a shuffle
+	IsShuffle bool // True if this stage's input requires a shuffle
 	State    string // PENDING, RUNNING, COMPLETED, FAILED
 }
 
@@ -58,7 +58,7 @@ func (ds *DAGScheduler) Execute(finalRDD *RDD) ([]KeyValue, error) {
 			"stage_id", stage.ID,
 			"rdd_id", stage.RDD.ID,
 			"partitions", len(stage.RDD.Partitions),
-			"is_shuffle", stage.IsShffle,
+			"is_shuffle", stage.IsShuffle,
 		)
 
 		// In this local implementation, computation is already materialized
@@ -85,7 +85,7 @@ func (ds *DAGScheduler) buildStages(rdd *RDD, stageMap map[string]*Stage) *Stage
 	for _, dep := range rdd.Deps {
 		parentStage := ds.buildStages(dep.Parent, stageMap)
 		if dep.Type == WideDep {
-			stage.IsShffle = true
+			stage.IsShuffle = true
 			stage.Parents = append(stage.Parents, parentStage)
 		} else {
 			// Narrow dep: pipeline into same stage (parent's tasks merge with this stage)

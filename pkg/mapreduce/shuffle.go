@@ -1,6 +1,7 @@
 package mapreduce
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -114,7 +115,7 @@ func (s *ShuffleServer) GetMapOutput(req *pb.GetMapOutputRequest, stream pb.Shuf
 
 // ReportShuffleFetchFailure handles a reducer's report that it couldn't fetch
 // map output from a mapper node. The AM should re-run the failed map task.
-func (s *ShuffleServer) ReportShuffleFetchFailure(_ interface{}, req *pb.ShuffleFetchFailureRequest) (*pb.ShuffleFetchFailureResponse, error) {
+func (s *ShuffleServer) ReportShuffleFetchFailure(_ context.Context, req *pb.ShuffleFetchFailureRequest) (*pb.ShuffleFetchFailureResponse, error) {
 	slog.Warn("shuffle fetch failure reported",
 		"job_id", req.JobId,
 		"map_task_id", req.MapTaskId,
