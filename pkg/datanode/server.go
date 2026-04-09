@@ -3,9 +3,11 @@ package datanode
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/mini-hadoop/mini-hadoop/pkg/config"
@@ -307,14 +309,29 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 		}
 	}
 
-	// Receive data chunks, write locally, and forward
-	var buf bytes.Buffer
+	// Stream chunks directly to disk + forward + compute checksum incrementally.
+	// Memory usage: O(chunk_size) per write, NOT O(block_size).
+	blockPath, pathErr := s.storage.BlockPathForWrite(blockID)
+	if pathErr != nil {
+		return stream.SendAndClose(&pb.WriteBlockResponse{Success: false, Error: pathErr.Error()})
+	}
+
+	localFile, fileErr := os.Create(blockPath)
+	if fileErr != nil {
+		return stream.SendAndClose(&pb.WriteBlockResponse{Success: false, Error: fileErr.Error()})
+	}
+
+	hasher := sha256.New()
+	var written int64
+
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			localFile.Close()
+			os.Remove(blockPath)
 			return fmt.Errorf("receive chunk: %w", err)
 		}
 
@@ -323,7 +340,17 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 			continue
 		}
 
-		buf.Write(chunk.Data)
+		// Write to local disk
+		n, writeErr := localFile.Write(chunk.Data)
+		if writeErr != nil {
+			localFile.Close()
+			os.Remove(blockPath)
+			return fmt.Errorf("write to disk: %w", writeErr)
+		}
+		written += int64(n)
+
+		// Update checksum incrementally
+		hasher.Write(chunk.Data)
 
 		// Forward to next in pipeline — break forwarding on error
 		if nextStream != nil {
@@ -331,7 +358,7 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 				Payload: &pb.WriteBlockRequest_Chunk{Chunk: chunk},
 			}); err != nil {
 				slog.Error("pipeline forward failed, stopping downstream", "blockID", blockID, "error", err)
-				nextStream = nil // Stop forwarding; NameNode will detect under-replication
+				nextStream = nil
 			}
 		}
 
@@ -339,6 +366,11 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 			break
 		}
 	}
+	localFile.Close()
+	checksum := hasher.Sum(nil)
+
+	// Register the block in storage tracking
+	s.storage.RegisterWrittenBlock(blockID, genStamp, written)
 
 	// Close forwarding stream and get response (only if stream is still healthy)
 	if nextStream != nil {
@@ -349,13 +381,6 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 			slog.Warn("pipeline downstream write failed", "blockID", blockID, "error", nextResp.Error)
 		}
 	}
-	// If nextStream was set to nil due to forwarding failure, nextConn is still open — close it
-	if nextConn != nil {
-		// defer already handles this, but explicit note for clarity
-	}
-
-	// Write block locally
-	written, checksum, err := s.storage.WriteBlock(blockID, genStamp, &buf)
 	if err != nil {
 		return stream.SendAndClose(&pb.WriteBlockResponse{
 			Success: false,

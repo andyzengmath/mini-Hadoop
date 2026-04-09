@@ -73,6 +73,33 @@ func GetMapper(name string) (Mapper, error) {
 	}
 }
 
+// GetCombiner returns a combiner by name. Combiners are optional — returns nil, nil for empty name.
+func GetCombiner(name string) (Combiner, error) {
+	if name == "" {
+		return nil, nil
+	}
+	switch name {
+	case "sum", "wordcount", "sumbykey":
+		return &SumCombiner{}, nil
+	default:
+		return nil, fmt.Errorf("unknown combiner: %s", name)
+	}
+}
+
+// SumCombiner pre-aggregates integer values for each key (same logic as SumReducer).
+type SumCombiner struct{}
+
+func (c *SumCombiner) Combine(key string, values []string, emit func(key, value string)) {
+	total := 0
+	for _, v := range values {
+		n, err := strconv.Atoi(v)
+		if err == nil {
+			total += n
+		}
+	}
+	emit(key, strconv.Itoa(total))
+}
+
 // GetReducer returns a reducer by name.
 func GetReducer(name string) (Reducer, error) {
 	switch name {
