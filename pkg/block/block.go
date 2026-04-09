@@ -28,12 +28,13 @@ func (id ID) String() string {
 
 // Metadata holds block-level metadata tracked by the NameNode.
 type Metadata struct {
-	BlockID         ID       `json:"block_id"`
-	SizeBytes       int64    `json:"size_bytes"`
-	Checksum        []byte   `json:"checksum"`
-	Locations       []string `json:"locations"`       // DataNode addresses
-	GenerationStamp int64    `json:"generation_stamp"` // For orphaning partial blocks
-	ReplicationTarget int32  `json:"replication_target"`
+	BlockID           ID       `json:"block_id"`
+	SizeBytes         int64    `json:"size_bytes"`
+	Checksum          []byte   `json:"checksum"`
+	Locations         []string `json:"locations"`          // DataNode addresses with confirmed replicas
+	PendingLocations  []string `json:"pending_locations"`  // Targets with in-flight replication (not yet confirmed)
+	GenerationStamp   int64    `json:"generation_stamp"`   // For orphaning partial blocks
+	ReplicationTarget int32    `json:"replication_target"`
 }
 
 // NewMetadata creates a new block metadata with a fresh ID.
@@ -45,18 +46,31 @@ func NewMetadata(replicationTarget int32) Metadata {
 	}
 }
 
-// IsUnderReplicated returns true if current replica count is below target.
+// IsUnderReplicated returns true if current + pending replicas are below target.
 func (m Metadata) IsUnderReplicated() bool {
-	return int32(len(m.Locations)) < m.ReplicationTarget
+	return int32(len(m.Locations)+len(m.PendingLocations)) < m.ReplicationTarget
 }
 
-// ReplicaDeficit returns how many more replicas are needed.
+// ReplicaDeficit returns how many more replicas are needed (accounting for pending).
 func (m Metadata) ReplicaDeficit() int32 {
-	deficit := m.ReplicationTarget - int32(len(m.Locations))
+	total := int32(len(m.Locations) + len(m.PendingLocations))
+	deficit := m.ReplicationTarget - total
 	if deficit < 0 {
 		return 0
 	}
 	return deficit
+}
+
+// ClearPendingLocation removes an address from PendingLocations (called when
+// a block report confirms the replica exists, or when replication is known to have failed).
+func (m *Metadata) ClearPendingLocation(addr string) {
+	filtered := m.PendingLocations[:0]
+	for _, loc := range m.PendingLocations {
+		if loc != addr {
+			filtered = append(filtered, loc)
+		}
+	}
+	m.PendingLocations = filtered
 }
 
 // ComputeChecksum computes the SHA-256 checksum of the given data.

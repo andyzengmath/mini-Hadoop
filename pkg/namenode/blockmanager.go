@@ -124,10 +124,16 @@ func (bm *BlockManager) ProcessBlockReport(nodeID string, reportedBlocks []struc
 		}
 
 		// Ensure this DataNode is recorded as a location
-		addr := bm.datanodes[nodeID].Address
-		if !containsString(meta.Locations, addr) {
-			meta.Locations = append(meta.Locations, addr)
+		dn, dnExists := bm.datanodes[nodeID]
+		if !dnExists || dn == nil {
+			slog.Warn("block report from unknown DataNode", "nodeID", nodeID)
+			continue
 		}
+		if !containsString(meta.Locations, dn.Address) {
+			meta.Locations = append(meta.Locations, dn.Address)
+		}
+		// Confirm pending replication if this address was pending
+		meta.ClearPendingLocation(dn.Address)
 	}
 
 	return toDelete
@@ -248,8 +254,9 @@ func (bm *BlockManager) CheckAndReplicateBlocks() {
 			continue
 		}
 
-		// Find target nodes that don't already hold this block
-		targets := bm.findReplicationTargets(meta.Locations, deficit)
+		// Find target nodes that don't already hold this block (or have pending replication)
+		excludeAddrs := append(meta.Locations, meta.PendingLocations...)
+		targets := bm.findReplicationTargets(excludeAddrs, deficit)
 		if len(targets) == 0 {
 			continue
 		}
@@ -266,9 +273,8 @@ func (bm *BlockManager) CheckAndReplicateBlocks() {
 				TargetNodes: []string{target},
 				SourceNode:  sourceAddr,
 			})
-			// NOTE: Do NOT add target to meta.Locations here.
-			// The location will be added when the target DataNode's
-			// block report confirms the replica actually exists.
+			// Track as pending — will be confirmed by block report or cleared on failure
+			meta.PendingLocations = append(meta.PendingLocations, target)
 			slog.Info("scheduled re-replication",
 				"blockID", blockID,
 				"source", sourceAddr,

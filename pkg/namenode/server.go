@@ -58,8 +58,10 @@ func (s *Server) heartbeatMonitor() {
 			deadNodes := s.bm.DetectDeadNodes()
 			if len(deadNodes) > 0 {
 				slog.Warn("dead nodes detected", "count", len(deadNodes), "nodes", deadNodes)
-				s.bm.CheckAndReplicateBlocks()
 			}
+			// Always check for under-replicated blocks, not just on new deaths.
+			// Failed replications from prior cycles need to be retried.
+			s.bm.CheckAndReplicateBlocks()
 		case <-s.stopCh:
 			return
 		}

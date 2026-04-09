@@ -326,14 +326,13 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 
 		buf.Write(chunk.Data)
 
-		// Forward to next in pipeline
+		// Forward to next in pipeline — break forwarding on error
 		if nextStream != nil {
 			if err := nextStream.Send(&pb.WriteBlockRequest{
 				Payload: &pb.WriteBlockRequest_Chunk{Chunk: chunk},
 			}); err != nil {
-				slog.Error("pipeline forward failed", "blockID", blockID, "error", err)
-				// Pipeline failure: we still write locally
-				// The NameNode will detect under-replication and fix it
+				slog.Error("pipeline forward failed, stopping downstream", "blockID", blockID, "error", err)
+				nextStream = nil // Stop forwarding; NameNode will detect under-replication
 			}
 		}
 
@@ -342,7 +341,7 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 		}
 	}
 
-	// Close forwarding stream and get response
+	// Close forwarding stream and get response (only if stream is still healthy)
 	if nextStream != nil {
 		nextResp, err := nextStream.CloseAndRecv()
 		if err != nil {
@@ -350,6 +349,10 @@ func (s *Server) WriteBlock(stream pb.DataNodeService_WriteBlockServer) error {
 		} else if !nextResp.Success {
 			slog.Warn("pipeline downstream write failed", "blockID", blockID, "error", nextResp.Error)
 		}
+	}
+	// If nextStream was set to nil due to forwarding failure, nextConn is still open — close it
+	if nextConn != nil {
+		// defer already handles this, but explicit note for clarity
 	}
 
 	// Write block locally

@@ -182,6 +182,60 @@ func validateID(id string) error {
 	return nil
 }
 
+// allowedCommands is the set of binaries NodeManager is permitted to execute.
+var allowedCommands = map[string]bool{
+	"mapworker":        true,
+	"mrappmaster":      true,
+	"namenode":         true,
+	"datanode":         true,
+	"resourcemanager":  true,
+	"nodemanager":      true,
+	"hdfs":             true,
+	"mapreduce":        true,
+}
+
+// allowedArgFlags is the set of argument flags permitted for launched processes.
+var allowedArgFlags = map[string]bool{
+	"--mode": true, "--task-id": true, "--job-id": true,
+	"--mapper": true, "--reducer": true, "--block-id": true,
+	"--namenode": true, "--num-reducers": true, "--partition-id": true,
+	"--output": true, "--input": true, "--rm": true,
+	"--config": true, "--id": true, "--port": true,
+}
+
+// allowedEnvKeys is the set of environment variables permitted for containers.
+var allowedEnvKeys = map[string]bool{
+	"MINIHADOOP_NAMENODE_HOST": true, "MINIHADOOP_NAMENODE_PORT": true,
+	"MINIHADOOP_RM_HOST": true, "MINIHADOOP_RM_PORT": true,
+	"MINIHADOOP_HOSTNAME": true, "MINIHADOOP_JOB_ID": true,
+	"MINIHADOOP_TASK_ID": true, "NODE_ADDRESS": true,
+	"MINIHADOOP_DATANODE_PORT": true, "MINIHADOOP_NM_PORT": true,
+	"MINIHADOOP_DATA_DIR": true, "MINIHADOOP_TEMP_DIR": true,
+}
+
+// validateCommand checks command against the allowlist.
+func validateCommand(cmd string) error {
+	clean := filepath.Base(filepath.Clean(cmd))
+	if !allowedCommands[clean] {
+		return fmt.Errorf("command %q not in allowlist", clean)
+	}
+	return nil
+}
+
+// validateArgs checks that argument flags are in the allowlist and values have no shell metacharacters.
+func validateArgs(args []string) error {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			if !allowedArgFlags[arg] {
+				return fmt.Errorf("disallowed argument flag: %q", arg)
+			}
+		} else if strings.ContainsAny(arg, "|;&`$\\") {
+			return fmt.Errorf("invalid characters in argument value: %q", arg)
+		}
+	}
+	return nil
+}
+
 // safePath resolves a path under a base directory and verifies no traversal.
 func safePath(base, child string) (string, error) {
 	resolved := filepath.Join(base, child)
@@ -210,10 +264,15 @@ func (s *Server) LaunchContainer(_ context.Context, req *pb.LaunchContainerReque
 		return &pb.LaunchContainerResponse{Success: false, Error: "invalid container ID: " + err.Error()}, nil
 	}
 
-	// Validate command (prevent command injection)
-	cleanCmd := filepath.Clean(spec.Command)
-	if strings.Contains(cleanCmd, "..") || strings.ContainsAny(cleanCmd, "|;&`$") {
-		return &pb.LaunchContainerResponse{Success: false, Error: "invalid command: " + cleanCmd}, nil
+	// Validate command against allowlist (prevent command injection)
+	if err := validateCommand(spec.Command); err != nil {
+		return &pb.LaunchContainerResponse{Success: false, Error: err.Error()}, nil
+	}
+	cleanCmd := filepath.Base(filepath.Clean(spec.Command))
+
+	// Validate args against allowlist
+	if err := validateArgs(spec.Args); err != nil {
+		return &pb.LaunchContainerResponse{Success: false, Error: err.Error()}, nil
 	}
 
 	// Hold lock from existence check through insertion (fix TOCTOU race)
@@ -236,14 +295,13 @@ func (s *Server) LaunchContainer(_ context.Context, req *pb.LaunchContainerReque
 	// Build the command
 	cmd := exec.Command(cleanCmd, spec.Args...)
 
-	// Build minimal isolated environment (don't inherit host env)
+	// Build minimal isolated environment with allowlisted env vars only
 	cmd.Env = []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",
-		fmt.Sprintf("HOME=/tmp"),
+		"HOME=/tmp",
 	}
-	blockedEnvKeys := map[string]bool{"PATH": true, "LD_PRELOAD": true, "LD_LIBRARY_PATH": true}
 	for k, v := range spec.Env {
-		if !blockedEnvKeys[k] {
+		if allowedEnvKeys[k] {
 			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 		}
 	}

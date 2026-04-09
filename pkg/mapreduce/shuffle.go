@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	pb "github.com/mini-hadoop/mini-hadoop/proto"
@@ -142,6 +143,12 @@ func (s *ShuffleServer) ReportShuffleFetchFailure(_ interface{}, req *pb.Shuffle
 
 // CleanupJob removes all map outputs for a completed job.
 func (s *ShuffleServer) CleanupJob(jobID string) {
+	// Validate jobID to prevent path traversal via os.RemoveAll
+	if jobID == "" || strings.ContainsAny(jobID, `/\`) || strings.Contains(jobID, "..") {
+		slog.Warn("invalid job ID for cleanup, skipping", "job_id", jobID)
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -150,14 +157,25 @@ func (s *ShuffleServer) CleanupJob(jobID string) {
 			for _, f := range partFiles {
 				os.Remove(f)
 			}
-			// Clean up task temp directories
 		}
 		delete(s.mapOutputs, jobID)
 	}
 
-	// Clean up job temp directory
+	// Clean up job temp directory with path containment check
 	jobDir := filepath.Join(s.tempDir, jobID)
-	os.RemoveAll(jobDir)
+	absJobDir, err := filepath.Abs(jobDir)
+	if err != nil {
+		return
+	}
+	absTempDir, err := filepath.Abs(s.tempDir)
+	if err != nil {
+		return
+	}
+	if !strings.HasPrefix(absJobDir, absTempDir+string(filepath.Separator)) {
+		slog.Warn("path traversal detected in job cleanup", "job_id", jobID)
+		return
+	}
+	os.RemoveAll(absJobDir)
 
 	slog.Info("shuffle cleanup", "job_id", jobID)
 }
