@@ -333,11 +333,38 @@ Machine A (master)          Machine B (worker-1)
 | `MINIHADOOP_METADATA_DIR` | /tmp/minihadoop/namenode | NameNode state directory |
 | `MINIHADOOP_TEMP_DIR` | /tmp/minihadoop/temp | Temporary files |
 
+## Benchmarking (mini-Hadoop vs Apache Hadoop)
+
+18-benchmark comparison suite running both systems in Docker with identical configurations.
+
+```bash
+# Run all 18 benchmarks (~20-30 min)
+./scripts/benchmark.sh
+
+# Quick run (10MB, fewer iterations, ~10 min)
+./scripts/benchmark.sh quick
+
+# mini-Hadoop only (~5 min)
+./scripts/benchmark.sh mini-only
+```
+
+| Category | Benchmarks | Key Metrics |
+|----------|-----------|-------------|
+| Storage (S1-S4) | Write/read throughput, small files, concurrent integrity | MB/s, files/s, SHA-256 |
+| Fault Tolerance (F1-F4) | Detection time, durability, recovery, multi-failure | Seconds, pass/fail |
+| MapReduce (M1-M4) | WordCount, SumByKey, Sort, scaling | Wall-clock ms |
+| Resources (R1-R5) | Image size, memory, peak memory, startup, LOC | MB, seconds |
+| Correctness (C1-C3) | Output equivalence, edge cases, replication | Match/differ |
+
+Results saved to `benchmark_results_*/` with per-test files and summary. See [benchmark plan](doc/benchmark-plan.md) for full methodology.
+
 ## Documentation
 
 - **[Manual Testing Guide](doc/manual-testing-guide.md)** — 10 step-by-step tests for verifying all features
 - **[Sample Run Output](doc/manual-testing-guide_sample_run.md)** — Verified test output (10/10 PASS)
 - **[Comprehensive Technical Report](doc/mini-hadoop-comprehensive-report.md)** — Full architecture analysis, data flow diagrams, algorithms
+- **[Benchmark Plan](doc/benchmark-plan.md)** — 18 benchmarks: mini-Hadoop vs Apache Hadoop
+- **[Scaling Analysis](doc/scaling-analysis.md)** — Bottleneck analysis + roadmap (3 → 1000+ nodes)
 - **[Integration Plan](doc/integration-plan.md)** — How to wire library-only features into servers
 - **[Phase 2 Implementation Plan](doc/phase2-plan.md)** — Detailed specs for advanced features
 

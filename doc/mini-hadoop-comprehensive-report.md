@@ -966,6 +966,36 @@ Machine A (master)           Machine B-D (workers)
 
 **Scaling:** Add workers by running `datanode` + `nodemanager` on additional machines with unique `--id` values. No master restart needed — workers register dynamically via heartbeats.
 
+### 10.5 Benchmark Suite (mini-Hadoop vs Apache Hadoop)
+
+An automated 18-benchmark comparison suite runs both systems in Docker with identical configurations (replication=3, block=128MB, heartbeat=3s).
+
+**Benchmark categories:**
+
+| Category | Benchmarks | What it measures |
+|----------|-----------|-----------------|
+| Storage (S1-S4) | Write throughput, read throughput, small files, concurrent integrity | I/O performance, metadata handling |
+| Fault Tolerance (F1-F4) | Detection time, durability, recovery, multi-failure | Resilience under node failures |
+| MapReduce (M1-M4) | WordCount, SumByKey, Sort, scaling | Processing pipeline performance |
+| Resources (R1-R5) | Image size, idle memory, peak memory, startup, LOC | Operational footprint |
+| Correctness (C1-C3) | Output equivalence, edge cases, replication consistency | Behavioral parity with Hadoop |
+
+**Methodology (per plan):**
+- 5 runs per benchmark, first discarded as warmup, remaining 4 averaged
+- Sizes: 10MB, 100MB, 500MB, 1GB for throughput tests
+- Both systems in Docker with matched resource constraints
+- Concurrent writes (1, 2, 4 clients) for integrity under load
+- Results saved to timestamped `benchmark_results_*/` directory
+
+**Running:**
+```bash
+./scripts/benchmark.sh              # All 18 benchmarks, both systems
+./scripts/benchmark.sh quick        # Quick subset (10MB, 3 runs)
+./scripts/benchmark.sh mini-only    # mini-Hadoop only
+```
+
+See [benchmark-plan.md](benchmark-plan.md) for full methodology and [scaling-analysis.md](scaling-analysis.md) for scaling roadmap.
+
 ---
 
 ## 11. Lessons Learned
