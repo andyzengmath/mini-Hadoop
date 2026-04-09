@@ -129,46 +129,44 @@ func (ec *ErasureCodec) Decode(shards [][]byte, originalSize int) ([]byte, error
 		}
 	}
 
-	// Try to reconstruct each missing data shard
+	// Reconstruct missing data shards using parity shard 0.
+	// Parity[0] = XOR of all data shards (with j=0, (i+0)%n == i, so no rotation).
+	// This correctly inverts: missing = parity[0] XOR all-other-data-shards.
+	// For multi-shard reconstruction, a proper RS library (klauspost/reedsolomon)
+	// is needed. This implementation handles single-shard loss via XOR parity.
+	pIdx := ec.DataShards // parity shard 0
 	for i := 0; i < ec.DataShards; i++ {
 		if shards[i] != nil {
 			continue
 		}
 
-		// Try each parity shard for reconstruction
-		for j := 0; j < ec.ParityShards; j++ {
-			pIdx := ec.DataShards + j
-			if shards[pIdx] == nil {
-				continue
-			}
+		if shards[pIdx] == nil {
+			return nil, fmt.Errorf("cannot reconstruct data shard %d: parity shard 0 unavailable", i)
+		}
 
-			// Reconstruct: missing = parity XOR all-other-data-shards-in-group
-			canReconstruct := true
-			for di := 0; di < ec.DataShards; di++ {
-				if di != i && shards[(di+j)%ec.DataShards] == nil {
-					canReconstruct = false
-					break
-				}
-			}
-
-			if canReconstruct {
-				shards[i] = make([]byte, shardSize)
-				copy(shards[i], shards[pIdx])
-				for di := 0; di < ec.DataShards; di++ {
-					if di == i {
-						continue
-					}
-					src := shards[(di+j)%ec.DataShards]
-					for k := 0; k < shardSize; k++ {
-						shards[i][k] ^= src[k]
-					}
-				}
+		// Check all other data shards are available
+		canReconstruct := true
+		for di := 0; di < ec.DataShards; di++ {
+			if di != i && shards[di] == nil {
+				canReconstruct = false
 				break
 			}
 		}
 
-		if shards[i] == nil {
-			return nil, fmt.Errorf("cannot reconstruct data shard %d", i)
+		if !canReconstruct {
+			return nil, fmt.Errorf("cannot reconstruct data shard %d: multiple data shards missing (need RS library)", i)
+		}
+
+		// Reconstruct: missing = parity XOR all other data shards
+		shards[i] = make([]byte, shardSize)
+		copy(shards[i], shards[pIdx])
+		for di := 0; di < ec.DataShards; di++ {
+			if di == i {
+				continue
+			}
+			for k := 0; k < shardSize; k++ {
+				shards[i][k] ^= shards[di][k]
+			}
 		}
 	}
 

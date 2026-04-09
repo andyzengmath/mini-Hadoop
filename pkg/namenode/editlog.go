@@ -76,7 +76,7 @@ func (el *EditLog) Append(op EditOp, path string, data interface{}) (int64, erro
 	el.mu.Lock()
 	defer el.mu.Unlock()
 
-	el.sequence++
+	seq := el.sequence + 1 // tentative — only committed after successful flush
 
 	var rawData json.RawMessage
 	if data != nil {
@@ -88,7 +88,7 @@ func (el *EditLog) Append(op EditOp, path string, data interface{}) (int64, erro
 	}
 
 	entry := EditEntry{
-		Sequence:  el.sequence,
+		Sequence:  seq,
 		Timestamp: time.Now(),
 		Operation: op,
 		Path:      path,
@@ -110,6 +110,7 @@ func (el *EditLog) Append(op EditOp, path string, data interface{}) (int64, erro
 		return 0, fmt.Errorf("flush edit log: %w", err)
 	}
 
+	el.sequence = seq // commit only after successful flush
 	return el.sequence, nil
 }
 
@@ -192,10 +193,14 @@ func (el *EditLog) Truncate() error {
 	defer el.mu.Unlock()
 
 	if el.writer != nil {
-		el.writer.Flush()
+		if err := el.writer.Flush(); err != nil {
+			return fmt.Errorf("flush before truncate: %w", err)
+		}
 	}
 	if el.file != nil {
-		el.file.Close()
+		if err := el.file.Close(); err != nil {
+			return fmt.Errorf("close before truncate: %w", err)
+		}
 	}
 
 	path := filepath.Join(el.dir, "edits.log")

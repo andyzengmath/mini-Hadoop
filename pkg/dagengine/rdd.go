@@ -230,12 +230,9 @@ func (r *RDD) CountByKey() map[string]int {
 }
 
 func hashKey(key string) int {
-	h := 0
+	h := uint64(0)
 	for _, c := range key {
-		h = h*31 + int(c)
+		h = h*31 + uint64(c)
 	}
-	if h < 0 {
-		h = -h
-	}
-	return h
+	return int(h >> 1) // always non-negative on any platform
 }

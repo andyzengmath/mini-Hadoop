@@ -185,6 +185,7 @@ type tcpBlockReader struct {
 	addr string
 	buf  []byte
 	pos  int
+	done bool // true = reached clean terminal state (ACK frame)
 }
 
 func (r *tcpBlockReader) Read(p []byte) (int, error) {
@@ -201,6 +202,7 @@ func (r *tcpBlockReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	if frameType == typeAck || len(payload) == 0 {
+		r.done = true // clean terminal state — safe to pool connection
 		return 0, io.EOF
 	}
 	if frameType != typeDataChunk {
@@ -215,7 +217,11 @@ func (r *tcpBlockReader) Read(p []byte) (int, error) {
 }
 
 func (r *tcpBlockReader) Close() error {
-	r.pool.Put(r.addr, r.conn)
+	if r.done {
+		r.pool.Put(r.addr, r.conn) // safe to reuse — protocol at clean boundary
+	} else {
+		r.conn.Close() // discard — protocol state unknown, prevents corruption
+	}
 	return nil
 }
 
