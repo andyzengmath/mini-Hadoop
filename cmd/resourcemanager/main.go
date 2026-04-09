@@ -51,6 +51,9 @@ func main() {
 		grpcServer.GracefulStop()
 	}()
 
+	// Start metrics server on port+100
+	rpc.StartMetricsServer(cfg.ResourceManagerPort+100, "resourcemanager", rm)
+
 	slog.Info("ResourceManager starting", "port", cfg.ResourceManagerPort)
 	if err := rpc.ListenAndServe(grpcServer, cfg.ResourceManagerPort); err != nil {
 		slog.Error("server failed", "error", err)

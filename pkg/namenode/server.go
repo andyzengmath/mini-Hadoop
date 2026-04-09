@@ -86,6 +86,42 @@ func (s *Server) metadataDumper() {
 	}
 }
 
+// GetMetrics returns NameNode metrics for the metrics server.
+func (s *Server) GetMetrics() map[string]interface{} {
+	total, alive := s.bm.GetDataNodeCount()
+	s.ns.mu.RLock()
+	nsSize := countNodes(s.ns.root)
+	s.ns.mu.RUnlock()
+
+	s.bm.mu.RLock()
+	totalBlocks := len(s.bm.blocks)
+	underReplicated := 0
+	for _, meta := range s.bm.blocks {
+		if meta.IsUnderReplicated() {
+			underReplicated++
+		}
+	}
+	s.bm.mu.RUnlock()
+
+	return map[string]interface{}{
+		"total_datanodes":       total,
+		"alive_datanodes":       alive,
+		"total_blocks":          totalBlocks,
+		"under_replicated":      underReplicated,
+		"namespace_entries":     nsSize,
+	}
+}
+
+func countNodes(node *FSNode) int {
+	count := 1
+	if node.IsDir {
+		for _, child := range node.Children {
+			count += countNodes(child)
+		}
+	}
+	return count
+}
+
 // --- gRPC method implementations ---
 
 func (s *Server) CreateFile(_ context.Context, req *pb.CreateFileRequest) (*pb.CreateFileResponse, error) {

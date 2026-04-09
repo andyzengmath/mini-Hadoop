@@ -56,6 +56,9 @@ func main() {
 		grpcServer.GracefulStop()
 	}()
 
+	// Start metrics server on port+100
+	rpc.StartMetricsServer(cfg.NameNodePort+100, "namenode", nn)
+
 	// Start serving
 	slog.Info("NameNode starting", "port", cfg.NameNodePort)
 	if err := rpc.ListenAndServe(grpcServer, cfg.NameNodePort); err != nil {
