@@ -107,7 +107,7 @@ bench_S1_write() {
   for sz in $sizes; do
     local label="${sz}MB"; [ "$sz" = "1024" ] && label="1GB"
     exec_fn $sys "dd if=/dev/urandom bs=1M count=$sz 2>/dev/null | base64 > /tmp/b-${sz}m.txt"
-    local actual=$(exec_fn $sys "wc -c < /tmp/b-${sz}m.txt" | tr -d ' \r\n')
+    local actual=$(exec_fn $sys "wc -c < /tmp/b-${sz}m.txt" | tr -d ' \r\n\t')
     local times=""
     for r in $(seq 1 $RUNS); do
       local s=$(ts_ms)
@@ -134,7 +134,7 @@ bench_S2_read() {
   log ""; log "=== S2: Sequential Read Throughput ($tag) ==="
   for sz in $sizes; do
     local label="${sz}MB"; [ "$sz" = "1024" ] && label="1GB"
-    local actual=$(exec_fn $sys "wc -c < /tmp/b-${sz}m.txt 2>/dev/null" | tr -d ' \r\n')
+    local actual=$(exec_fn $sys "wc -c < /tmp/b-${sz}m.txt 2>/dev/null" | tr -d ' \r\n\t')
     local times=""
     for r in $(seq 1 $RUNS); do
       local s=$(ts_ms)
@@ -197,15 +197,12 @@ bench_S4_integrity() {
     done
     write_cmd="$write_cmd wait"
     exec_fn $sys "$write_cmd"
-    # Verify all N
+    # Verify all N — use simple diff instead of SHA-256 to avoid quoting issues
     local pass=0
     for i in $(seq 1 $n); do
-      local result=$(exec_fn $sys "
-        HASH1=\$(sha256sum /tmp/s4-$i.txt | awk '{print \$1}')
-        $([ "$sys" = "mini" ] && echo "hdfs get /bench/s4/c${n}-$i.dat /tmp/s4v-$i.txt" || echo "hdfs dfs -get /bench/s4/c${n}-$i.dat /tmp/s4v-$i.txt")
-        HASH2=\$(sha256sum /tmp/s4v-$i.txt | awk '{print \$1}')
-        [ \"\$HASH1\" = \"\$HASH2\" ] && echo PASS || echo FAIL
-      ")
+      hdfs_get $sys "/bench/s4/c${n}-$i.dat" "/tmp/s4v-$i.txt" 2>/dev/null || true
+      local result=$(exec_fn $sys "diff /tmp/s4-$i.txt /tmp/s4v-$i.txt > /dev/null 2>&1 && echo PASS || echo FAIL")
+      result=$(echo "$result" | tr -d '\r\n ')
       [ "$result" = "PASS" ] && pass=$((pass+1))
     done
     log "  $n concurrent clients: $pass/$n checksums PASS"
@@ -504,7 +501,7 @@ bench_C2_edge_cases() {
   # Empty file
   exec_fn $sys "touch /tmp/c2-empty.txt"
   hdfs_put $sys "/tmp/c2-empty.txt" "/bench/c2/empty.dat"
-  local empty_sz=$(exec_fn $sys "$([ "$sys" = "mini" ] && echo "hdfs get /bench/c2/empty.dat /tmp/c2ev.txt" || echo "hdfs dfs -get /bench/c2/empty.dat /tmp/c2ev.txt") && wc -c < /tmp/c2ev.txt" | tr -d ' \r\n')
+  local empty_sz=$(exec_fn $sys "$([ "$sys" = "mini" ] && echo "hdfs get /bench/c2/empty.dat /tmp/c2ev.txt" || echo "hdfs dfs -get /bench/c2/empty.dat /tmp/c2ev.txt") && wc -c < /tmp/c2ev.txt" | tr -d ' \r\n\t')
   log "  Empty file: read back $empty_sz bytes (expected: 0)"
 
   # Single word
