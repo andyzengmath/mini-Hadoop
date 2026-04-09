@@ -895,12 +895,76 @@ docker-client-1            (CLI tools)
 **AC-7 baseline:**
 - Local throughput: 2.53 MB/s on 2MB WordCount (single-process reference)
 
-### 10.2 Code Quality Metrics
+### 10.2 Manual Test Results (10/10 PASS)
+
+Verified on Windows 11 + Docker Desktop 29.3.1 with a fresh 3-node cluster. Full output at [manual-testing-guide_sample_run.md](manual-testing-guide_sample_run.md).
+
+| # | Test | Key Verification | Result |
+|---|------|-----------------|--------|
+| 1 | Cluster Health | 3 DataNodes + 3 NodeManagers + metrics JSON | PASS |
+| 2 | Create Directories | Namespace tree operations | PASS |
+| 3 | Small File Upload/Download | Write/read pipeline, content matches | PASS |
+| 4 | Large File + SHA-256 | 27MB, SHA-256 `5f761693...97c85` matches | PASS |
+| 5 | Fault Tolerance | worker-2 killed, detected in 11s, file readable from survivors | PASS |
+| 6 | WordCount MapReduce | 23 words, the=4, fox=4, quick=3, brown=3 | PASS |
+| 7 | Distributed Mapworker | 6000 words across 2 reducers, each word=1000 | PASS |
+| 8 | File Operations | Delete, list, info all functional | PASS |
+| 9 | Metrics Dashboard | NameNode: total_blocks=2, RM: alive_nodes=3, health=ok | PASS |
+| 10 | SumByKey | electronics=650, clothing=200, food=150 | PASS |
+
+### 10.3 Code Quality Metrics
 
 - `go vet ./...`: Clean (zero warnings)
-- `go test -race ./...`: Clean (zero data races)
+- `go test -race ./...`: Clean (zero data races), 136 tests
 - 3-reviewer audit: Code quality, Architecture, Security
-- All CRITICAL and HIGH issues from review have been fixed
+- 3-agent quality audit: Completeness, Dead Code, Code Smells
+- All CRITICAL and HIGH issues from reviews have been fixed
+
+### 10.4 Multi-Machine Deployment
+
+mini-Hadoop runs across real separate machines, not just Docker on one host.
+
+**Topology:**
+```
+Machine A (master)           Machine B-D (workers)
+┌──────────────────┐        ┌──────────────────┐
+│ NameNode :9000   │◄──────►│ DataNode :9001   │
+│ RM       :9010   │◄──────►│ NodeManager:9011 │
+│ Dashboard:9100   │        └──────────────────┘
+│ Dashboard:9110   │         (repeat on each worker)
+└──────────────────┘
+```
+
+**Setup (per machine):**
+
+1. **Build:** `make build` → produces 7 binaries in `bin/`
+2. **Master (Machine A):**
+   ```bash
+   export MINIHADOOP_HOSTNAME=machine-a.local
+   ./bin/namenode --port 9000 &
+   ./bin/resourcemanager --port 9010 &
+   ```
+3. **Each Worker (Machine B, C, D, ...):**
+   ```bash
+   export MINIHADOOP_HOSTNAME=machine-b.local   # unique per machine
+   export MINIHADOOP_NAMENODE_HOST=machine-a.local
+   export MINIHADOOP_RM_HOST=machine-a.local
+   ./bin/datanode --id worker-1 --port 9001 &   # unique --id per worker
+   ./bin/nodemanager --id worker-1 --port 9011 &
+   ```
+4. **Client (any machine):**
+   ```bash
+   export MINIHADOOP_NAMENODE_HOST=machine-a.local
+   ./bin/hdfs put ./data.txt /input/data.txt
+   ./bin/mapreduce --job wordcount --input /input/data.txt --output /output --local
+   ```
+
+**Requirements:**
+- TCP ports 9000-9011 open between all machines
+- Each machine resolvable by hostname (DNS or `/etc/hosts`)
+- 3+ workers recommended for 3x replication
+
+**Scaling:** Add workers by running `datanode` + `nodemanager` on additional machines with unique `--id` values. No master restart needed — workers register dynamically via heartbeats.
 
 ---
 
