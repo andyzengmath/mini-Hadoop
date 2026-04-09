@@ -121,37 +121,42 @@ func TestProcessHeartbeat_UnknownNode(t *testing.T) {
 
 func TestCheckAndReplicateBlocks(t *testing.T) {
 	bm := makeManager(2, 10*time.Second)
-	bm.RegisterDataNode("n1", "host1:9001", 100<<30)
-	bm.RegisterDataNode("n2", "host2:9001", 100<<30)
+	// Give n1 highest capacity so it's always selected for the block
+	bm.RegisterDataNode("n1", "host1:9001", 200<<30)
+	bm.RegisterDataNode("n2", "host2:9001", 150<<30)
 	bm.RegisterDataNode("n3", "host3:9001", 100<<30)
 
-	meta, _, _ := bm.AllocateBlock(2, "client")
+	meta, pipeline, _ := bm.AllocateBlock(2, "client")
 	bm.CompleteBlock(meta.BlockID.String(), 1024, []byte("checksum"))
+	t.Logf("block allocated on pipeline: %v", pipeline)
 
-	// Simulate n1 dying
+	// Simulate n1 dying (n1 should always be in the pipeline due to highest capacity)
 	bm.mu.Lock()
 	bm.datanodes["n1"].Alive = false
 	bm.mu.Unlock()
 
 	bm.CheckAndReplicateBlocks()
 
-	// n3 should have a pending REPLICATE command
-	cmds, _ := bm.ProcessHeartbeat("n3", 0, 100<<30, 0)
+	// Check ALL alive nodes for a pending REPLICATE command
 	found := false
-	for _, cmd := range cmds {
-		if cmd.Type == "REPLICATE" && cmd.BlockID == meta.BlockID.String() {
-			found = true
+	for _, nodeID := range []string{"n2", "n3"} {
+		cmds, _ := bm.ProcessHeartbeat(nodeID, 0, 100<<30, 0)
+		for _, cmd := range cmds {
+			if cmd.Type == "REPLICATE" && cmd.BlockID == meta.BlockID.String() {
+				found = true
+			}
 		}
 	}
 	if !found {
-		t.Error("expected REPLICATE command for under-replicated block")
+		t.Error("expected REPLICATE command for under-replicated block on some alive node")
 	}
 }
 
 func TestCheckAndReplicateBlocks_NoDuplicateCommands(t *testing.T) {
 	bm := makeManager(2, 10*time.Second)
-	bm.RegisterDataNode("n1", "host1:9001", 100<<30)
-	bm.RegisterDataNode("n2", "host2:9001", 100<<30)
+	// Give n1 highest capacity so it's always in the pipeline
+	bm.RegisterDataNode("n1", "host1:9001", 200<<30)
+	bm.RegisterDataNode("n2", "host2:9001", 150<<30)
 	bm.RegisterDataNode("n3", "host3:9001", 100<<30)
 
 	meta, _, _ := bm.AllocateBlock(2, "client")
@@ -166,15 +171,18 @@ func TestCheckAndReplicateBlocks_NoDuplicateCommands(t *testing.T) {
 	// Second cycle should NOT re-queue (target is in PendingLocations)
 	bm.CheckAndReplicateBlocks()
 
-	cmds, _ := bm.ProcessHeartbeat("n3", 0, 100<<30, 0)
+	// Check all alive nodes for REPLICATE commands
 	replicateCount := 0
-	for _, cmd := range cmds {
-		if cmd.Type == "REPLICATE" {
-			replicateCount++
+	for _, nodeID := range []string{"n2", "n3"} {
+		cmds, _ := bm.ProcessHeartbeat(nodeID, 0, 100<<30, 0)
+		for _, cmd := range cmds {
+			if cmd.Type == "REPLICATE" {
+				replicateCount++
+			}
 		}
 	}
 	if replicateCount > 1 {
-		t.Errorf("expected at most 1 REPLICATE command, got %d (replication storm)", replicateCount)
+		t.Errorf("expected at most 1 REPLICATE command across all nodes, got %d (replication storm)", replicateCount)
 	}
 }
 

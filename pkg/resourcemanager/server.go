@@ -29,9 +29,10 @@ func NewServer(cfg config.Config) *Server {
 }
 
 // Start begins background monitoring.
-func (s *Server) Start() {
+func (s *Server) Start() error {
 	go s.nodeMonitor()
 	slog.Info("ResourceManager started")
+	return nil
 }
 
 // Stop halts background tasks.
