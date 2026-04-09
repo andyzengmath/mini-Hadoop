@@ -192,9 +192,10 @@ func (am *MRAppMaster) runReducePhase() error {
 	return nil
 }
 
-// runTaskWithRetry runs a task, retrying on failure up to MaxAttempts times.
+// runTaskWithRetry runs a task, retrying on failure. MaxAttempts is the total
+// number of attempts (not retries). E.g., MaxAttempts=3 means up to 3 tries.
 func (am *MRAppMaster) runTaskWithRetry(task *TaskInfo) error {
-	for attempt := 0; attempt <= task.MaxAttempts; attempt++ {
+	for attempt := 0; attempt < task.MaxAttempts; attempt++ {
 		task.Attempts = attempt + 1
 		task.State = TaskPending
 
@@ -268,7 +269,7 @@ func (am *MRAppMaster) runTaskWithRetry(task *TaskInfo) error {
 		return nil
 	}
 
-	return fmt.Errorf("task %s failed after %d attempts", task.TaskID, task.MaxAttempts+1)
+	return fmt.Errorf("task %s failed after %d attempts", task.TaskID, task.MaxAttempts)
 }
 
 // requestContainer asks the RM for a container, with locality hints for map tasks.
@@ -387,9 +388,11 @@ func (am *MRAppMaster) waitForTask(task *TaskInfo, container *pb.ContainerSpec) 
 	for i := 0; i < 600; i++ { // Max 10 minutes
 		time.Sleep(1 * time.Second)
 
-		resp, err := nmClient.GetContainerStatus(context.Background(), &pb.GetContainerStatusRequest{
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		resp, err := nmClient.GetContainerStatus(ctx, &pb.GetContainerStatusRequest{
 			ContainerId: container.ContainerId,
 		})
+		cancel()
 		if err != nil {
 			// NM might be down — treat as task failure
 			return fmt.Errorf("get status: %w", err)

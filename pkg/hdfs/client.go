@@ -110,7 +110,8 @@ func (c *Client) CreateFile(path string, data io.Reader, replication int32) erro
 			return fmt.Errorf("empty pipeline for block %s", blockID)
 		}
 
-		if writeErr := c.writeBlockToPipeline(blockID, blockBuf, pipeline, buf); writeErr != nil {
+		genStamp := addResp.Block.GenerationStamp
+		if writeErr := c.writeBlockToPipeline(blockID, genStamp, blockBuf, pipeline, buf); writeErr != nil {
 			return fmt.Errorf("write block %s: %w", blockID, writeErr)
 		}
 
@@ -139,7 +140,7 @@ func (c *Client) CreateFile(path string, data io.Reader, replication int32) erro
 }
 
 // writeBlockToPipeline sends block data to the first DataNode in the pipeline.
-func (c *Client) writeBlockToPipeline(blockID string, data *bytes.Buffer, pipeline []string, chunkBuf []byte) error {
+func (c *Client) writeBlockToPipeline(blockID string, genStamp int64, data *bytes.Buffer, pipeline []string, chunkBuf []byte) error {
 	conn, err := rpc.Dial(pipeline[0])
 	if err != nil {
 		return fmt.Errorf("connect to DataNode %s: %w", pipeline[0], err)
@@ -157,7 +158,7 @@ func (c *Client) writeBlockToPipeline(blockID string, data *bytes.Buffer, pipeli
 		Payload: &pb.WriteBlockRequest_Header{
 			Header: &pb.WriteBlockHeader{
 				BlockId:         blockID,
-				GenerationStamp: 1,
+				GenerationStamp: genStamp,
 				Pipeline:        pipeline,
 				PipelineIndex:   0,
 			},
