@@ -1,0 +1,114 @@
+version: "3.8"
+
+# Apache Hadoop 3-node cluster for benchmarking
+# Mirrors the mini-Hadoop Docker Compose topology:
+#   1 NameNode, 1 ResourceManager, 3 DataNodes/NodeManagers
+
+services:
+  hadoop-namenode:
+    image: apache/hadoop:3
+    hostname: hadoop-namenode
+    command: ["hdfs", "namenode"]
+    ports:
+      - "127.0.0.1:9870:9870"   # Web UI
+      - "127.0.0.1:8020:8020"   # HDFS RPC
+    environment:
+      HADOOP_HOME: /opt/hadoop
+      ENSURE_NAMENODE_DIR: /tmp/hadoop-root/dfs/name
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop-nn:/tmp/hadoop-root/dfs/name
+    networks:
+      - hadoop-bench
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  hadoop-resourcemanager:
+    image: apache/hadoop:3
+    hostname: hadoop-resourcemanager
+    command: ["yarn", "resourcemanager"]
+    ports:
+      - "127.0.0.1:8088:8088"   # RM Web UI
+    env_file:
+      - ./hadoop.env
+    depends_on:
+      hadoop-namenode:
+        condition: service_healthy
+    networks:
+      - hadoop-bench
+
+  hadoop-worker-1:
+    image: apache/hadoop:3
+    hostname: hadoop-worker-1
+    command: ["sh", "-c", "hdfs datanode & yarn nodemanager"]
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop-w1:/tmp/hadoop-root/dfs/data
+    depends_on:
+      hadoop-namenode:
+        condition: service_healthy
+      hadoop-resourcemanager:
+        condition: service_started
+    networks:
+      - hadoop-bench
+
+  hadoop-worker-2:
+    image: apache/hadoop:3
+    hostname: hadoop-worker-2
+    command: ["sh", "-c", "hdfs datanode & yarn nodemanager"]
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop-w2:/tmp/hadoop-root/dfs/data
+    depends_on:
+      hadoop-namenode:
+        condition: service_healthy
+      hadoop-resourcemanager:
+        condition: service_started
+    networks:
+      - hadoop-bench
+
+  hadoop-worker-3:
+    image: apache/hadoop:3
+    hostname: hadoop-worker-3
+    command: ["sh", "-c", "hdfs datanode & yarn nodemanager"]
+    env_file:
+      - ./hadoop.env
+    volumes:
+      - hadoop-w3:/tmp/hadoop-root/dfs/data
+    depends_on:
+      hadoop-namenode:
+        condition: service_healthy
+      hadoop-resourcemanager:
+        condition: service_started
+    networks:
+      - hadoop-bench
+
+  hadoop-client:
+    image: apache/hadoop:3
+    hostname: hadoop-client
+    command: ["sleep", "infinity"]
+    env_file:
+      - ./hadoop.env
+    depends_on:
+      - hadoop-worker-1
+      - hadoop-worker-2
+      - hadoop-worker-3
+    networks:
+      - hadoop-bench
+
+volumes:
+  hadoop-nn:
+  hadoop-w1:
+  hadoop-w2:
+  hadoop-w3:
+
+networks:
+  hadoop-bench:
+    driver: bridge
