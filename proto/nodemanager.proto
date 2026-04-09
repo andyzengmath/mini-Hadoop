@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package minihadoop;
+
+option go_package = "github.com/mini-hadoop/mini-hadoop/proto";
+
+import "proto/common.proto";
+
+// ContainerState is defined in common.proto (imported above)
+
+service NodeManagerService {
+  // Container lifecycle
+  rpc LaunchContainer(LaunchContainerRequest) returns (LaunchContainerResponse);
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+  rpc GetContainerStatus(GetContainerStatusRequest) returns (GetContainerStatusResponse);
+}
+
+message LaunchContainerRequest {
+  ContainerSpec spec = 1;
+}
+
+message LaunchContainerResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message StopContainerRequest {
+  string container_id = 1;
+}
+
+message StopContainerResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetContainerStatusRequest {
+  string container_id = 1;
+}
+
+message GetContainerStatusResponse {
+  string container_id = 1;
+  ContainerState state = 2;
+  int32 exit_code = 3;
+  string diagnostics = 4;
+  string error = 5;
+}
+

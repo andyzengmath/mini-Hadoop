@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package minihadoop;
+
+option go_package = "github.com/mini-hadoop/mini-hadoop/proto";
+
+service ShuffleService {
+  // GetMapOutput streams a specific partition of map output to a reducer.
+  rpc GetMapOutput(GetMapOutputRequest) returns (stream MapOutputChunk);
+
+  // ReportShuffleFetchFailure notifies the AM that a reducer could not fetch
+  // map output from a mapper node (mapper may have died after completing).
+  rpc ReportShuffleFetchFailure(ShuffleFetchFailureRequest) returns (ShuffleFetchFailureResponse);
+}
+
+message GetMapOutputRequest {
+  string job_id = 1;
+  string map_task_id = 2;
+  int32 partition_id = 3;   // Which reducer partition to fetch
+}
+
+// MapOutputChunk streams key-value pairs from map output.
+message MapOutputChunk {
+  bytes data = 1;         // Serialized key-value pairs
+  int64 offset = 2;
+  bool is_last = 3;
+}
+
+message ShuffleFetchFailureRequest {
+  string job_id = 1;
+  string map_task_id = 2;
+  string reducer_task_id = 3;
+  string failed_node = 4;    // The mapper node that was unreachable
+  string error_message = 5;
+}
+
+message ShuffleFetchFailureResponse {
+  bool acknowledged = 1;
+  string new_map_location = 2;  // If map was already re-run, provide new location
+  string error = 3;
+}

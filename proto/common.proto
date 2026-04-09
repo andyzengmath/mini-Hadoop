@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package minihadoop;
+
+option go_package = "github.com/mini-hadoop/mini-hadoop/proto";
+
+// BlockInfo describes a single block replica's metadata.
+message BlockInfo {
+  string block_id = 1;
+  int64 size_bytes = 2;
+  bytes checksum = 3;           // SHA-256
+  repeated string locations = 4; // DataNode addresses holding replicas
+  int64 generation_stamp = 5;   // Version stamp for orphaning partial blocks
+}
+
+// FileInfo describes a file in the namespace.
+message FileInfo {
+  string path = 1;
+  int64 size_bytes = 2;
+  repeated string block_ids = 3;
+  int32 replication_factor = 4;
+  int32 permissions = 5;
+  bool is_directory = 6;
+  int64 modification_time = 7;
+}
+
+// InputSplit describes a unit of work for a map task.
+message InputSplit {
+  string file_path = 1;
+  string block_id = 2;
+  int64 offset = 3;
+  int64 length = 4;
+  repeated string locations = 5; // DataNode addresses holding this block
+}
+
+// ContainerSpec describes resources for a container.
+message ContainerSpec {
+  string container_id = 1;
+  string node_id = 2;
+  int32 memory_mb = 3;
+  int32 cpu_vcores = 4;
+  string command = 5;
+  repeated string args = 6;
+  map<string, string> env = 7;
+}
+
+// TaskSpec describes a map or reduce task.
+message TaskSpec {
+  string task_id = 1;
+  TaskType task_type = 2;
+  InputSplit input_split = 3;  // For map tasks
+  string output_path = 4;
+  int32 partition_id = 5;      // For reduce tasks: which partition to process
+  int32 num_reducers = 6;
+  string job_id = 7;
+}
+
+enum TaskType {
+  TASK_TYPE_UNSPECIFIED = 0;
+  MAP = 1;
+  REDUCE = 2;
+}
+
+// NodeStatus reports a node's current resource state.
+message NodeStatus {
+  string node_id = 1;
+  string address = 2;
+  int32 total_memory_mb = 3;
+  int32 used_memory_mb = 4;
+  int32 total_cpu = 5;
+  int32 used_cpu = 6;
+  int32 num_containers = 7;
+  bool healthy = 8;
+}
+
+// ApplicationStatus tracks a submitted application.
+message ApplicationStatus {
+  string app_id = 1;
+  AppState state = 2;
+  string am_address = 3;
+  float progress = 4;
+  string diagnostics = 5;
+  int64 start_time = 6;
+  int64 finish_time = 7;
+}
+
+enum AppState {
+  APP_STATE_UNSPECIFIED = 0;
+  SUBMITTED = 1;
+  RUNNING = 2;
+  FINISHED = 3;
+  FAILED = 4;
+  KILLED = 5;
+}
+
+// LocalityPreference for container allocation.
+message LocalityPreference {
+  repeated string preferred_nodes = 1;
+  bool relaxed = 2; // Allow non-local if preferred unavailable
+}
+
+// ContainerState tracks a container's lifecycle.
+enum ContainerState {
+  CONTAINER_STATE_UNSPECIFIED = 0;
+  CONTAINER_RUNNING = 1;
+  CONTAINER_COMPLETED = 2;
+  CONTAINER_FAILED = 3;
+  CONTAINER_KILLED = 4;
+}

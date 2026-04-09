@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package minihadoop;
+
+option go_package = "github.com/mini-hadoop/mini-hadoop/proto";
+
+import "proto/common.proto";
+
+service NameNodeService {
+  // File operations
+  rpc CreateFile(CreateFileRequest) returns (CreateFileResponse);
+  rpc GetBlockLocations(GetBlockLocationsRequest) returns (GetBlockLocationsResponse);
+  rpc AddBlock(AddBlockRequest) returns (AddBlockResponse);
+  rpc CompleteFile(CompleteFileRequest) returns (CompleteFileResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc ListDirectory(ListDirectoryRequest) returns (ListDirectoryResponse);
+  rpc MkDir(MkDirRequest) returns (MkDirResponse);
+  rpc GetFileInfo(GetFileInfoRequest) returns (GetFileInfoResponse);
+
+  // DataNode management
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc BlockReport(BlockReportRequest) returns (BlockReportResponse);
+  rpc RegisterDataNode(RegisterDataNodeRequest) returns (RegisterDataNodeResponse);
+}
+
+// --- File operations ---
+
+message CreateFileRequest {
+  string path = 1;
+  int32 replication_factor = 2; // 0 = use default (3)
+  int64 block_size = 3;        // 0 = use default (128MB)
+}
+
+message CreateFileResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetBlockLocationsRequest {
+  string path = 1;
+  int64 offset = 2;
+  int64 length = 3;
+}
+
+message GetBlockLocationsResponse {
+  repeated BlockInfo blocks = 1;
+  string error = 2;
+}
+
+message AddBlockRequest {
+  string path = 1;
+  string client_address = 2; // For locality-based DN selection
+}
+
+message AddBlockResponse {
+  BlockInfo block = 1;
+  repeated string pipeline = 2; // Ordered list of DataNode addresses for pipeline write
+  string error = 3;
+}
+
+message CompleteFileRequest {
+  string path = 1;
+  repeated string block_ids = 2;
+}
+
+message CompleteFileResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message DeleteFileRequest {
+  string path = 1;
+  bool recursive = 2;
+}
+
+message DeleteFileResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ListDirectoryRequest {
+  string path = 1;
+}
+
+message ListDirectoryResponse {
+  repeated FileInfo entries = 1;
+  string error = 2;
+}
+
+message MkDirRequest {
+  string path = 1;
+  bool create_parents = 2;
+}
+
+message MkDirResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetFileInfoRequest {
+  string path = 1;
+}
+
+message GetFileInfoResponse {
+  FileInfo info = 1;
+  string error = 2;
+}
+
+// --- DataNode management ---
+
+message RegisterDataNodeRequest {
+  string node_id = 1;
+  string address = 2;        // host:port for data transfer
+  int64 capacity_bytes = 3;
+}
+
+message RegisterDataNodeResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  int64 used_bytes = 2;
+  int64 available_bytes = 3;
+  int32 num_blocks = 4;
+}
+
+// HeartbeatResponse can carry commands from NameNode to DataNode.
+message HeartbeatResponse {
+  repeated BlockCommand commands = 1;
+}
+
+message BlockCommand {
+  CommandType type = 1;
+  string block_id = 2;
+  repeated string target_nodes = 3; // For replication: where to send the block
+  string source_node = 4;           // For replication: where to get the block
+}
+
+enum CommandType {
+  COMMAND_TYPE_UNSPECIFIED = 0;
+  REPLICATE = 1; // Copy block to target_nodes
+  DELETE = 2;    // Delete block locally
+}
+
+message BlockReportRequest {
+  string node_id = 1;
+  repeated BlockReportEntry blocks = 2;
+}
+
+message BlockReportEntry {
+  string block_id = 1;
+  int64 size_bytes = 2;
+  int64 generation_stamp = 3;
+}
+
+message BlockReportResponse {
+  repeated string blocks_to_delete = 1; // Blocks the DN should remove (orphaned)
+}
