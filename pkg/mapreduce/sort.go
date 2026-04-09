@@ -11,15 +11,17 @@ import (
 )
 
 // SortBuffer accumulates key-value pairs in memory, sorts them, and spills
-// to disk when the buffer exceeds a size threshold.
+// to disk when the buffer exceeds a size threshold. An optional Combiner
+// pre-aggregates values per key during spill to reduce shuffle volume.
 type SortBuffer struct {
-	buffer     []KeyValue
-	bufferSize int // current estimated size in bytes
-	maxSize    int // threshold for spilling
-	spillDir   string
-	spillFiles []string
+	buffer      []KeyValue
+	bufferSize  int // current estimated size in bytes
+	maxSize     int // threshold for spilling
+	spillDir    string
+	spillFiles  []string
 	partitioner Partitioner
 	numReducers int
+	combiner    Combiner // optional: pre-aggregate during spill
 }
 
 // NewSortBuffer creates a new sort buffer.
@@ -32,6 +34,11 @@ func NewSortBuffer(maxSizeMB int, spillDir string, partitioner Partitioner, numR
 		partitioner: partitioner,
 		numReducers: numReducers,
 	}
+}
+
+// SetCombiner sets an optional combiner for pre-aggregation during spill.
+func (sb *SortBuffer) SetCombiner(c Combiner) {
+	sb.combiner = c
 }
 
 // Add inserts a key-value pair into the buffer, spilling if necessary.
@@ -61,6 +68,12 @@ func (sb *SortBuffer) spill() error {
 		return sb.buffer[i].Key < sb.buffer[j].Key
 	})
 
+	// Apply combiner if present — pre-aggregate adjacent keys to reduce spill size
+	spillData := sb.buffer
+	if sb.combiner != nil {
+		spillData = sb.applyCombiner(sb.buffer)
+	}
+
 	// Write to spill file
 	spillPath := filepath.Join(sb.spillDir, fmt.Sprintf("spill-%d.dat", len(sb.spillFiles)))
 	f, err := os.Create(spillPath)
@@ -70,7 +83,7 @@ func (sb *SortBuffer) spill() error {
 	defer f.Close()
 
 	w := bufio.NewWriter(f)
-	for _, kv := range sb.buffer {
+	for _, kv := range spillData {
 		p := sb.partitioner.Partition(kv.Key, sb.numReducers)
 		fmt.Fprintf(w, "%d\t%s\t%s\n", p, kv.Key, kv.Value)
 	}
@@ -155,6 +168,28 @@ func (sb *SortBuffer) mergeSpillToPartitions(spillPath string, writers []*bufio.
 		}
 	}
 	return scanner.Err()
+}
+
+// applyCombiner groups adjacent keys (buffer is already sorted by partition+key)
+// and applies the combiner to each group, reducing the number of records.
+func (sb *SortBuffer) applyCombiner(sorted []KeyValue) []KeyValue {
+	if len(sorted) == 0 {
+		return sorted
+	}
+	var combined []KeyValue
+	i := 0
+	for i < len(sorted) {
+		key := sorted[i].Key
+		var values []string
+		for i < len(sorted) && sorted[i].Key == key {
+			values = append(values, sorted[i].Value)
+			i++
+		}
+		sb.combiner.Combine(key, values, func(k, v string) {
+			combined = append(combined, KeyValue{Key: k, Value: v})
+		})
+	}
+	return combined
 }
 
 // ReadPartitionFile reads a sorted partition file and returns key-value pairs.
