@@ -187,6 +187,30 @@ func (bs *BlockStorage) blockPath(blockID string) (string, error) {
 	return absResolved, nil
 }
 
+// BlockPathForWrite returns the file path for writing a new block, with path traversal validation.
+// The caller is responsible for creating and closing the file.
+func (bs *BlockStorage) BlockPathForWrite(blockID string) (string, error) {
+	return bs.blockPath(blockID)
+}
+
+// RegisterWrittenBlock adds a block to the tracking map after it has been written to disk
+// externally (e.g., by the streaming WriteBlock handler).
+func (bs *BlockStorage) RegisterWrittenBlock(blockID string, generationStamp int64, sizeBytes int64) {
+	path, err := bs.blockPath(blockID)
+	if err != nil {
+		return
+	}
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	bs.blocks[blockID] = BlockEntry{
+		BlockID:         blockID,
+		SizeBytes:       sizeBytes,
+		GenerationStamp: generationStamp,
+		FilePath:        path,
+	}
+	slog.Info("block registered", "blockID", blockID, "size", sizeBytes)
+}
+
 func (bs *BlockStorage) scanExistingBlocks() error {
 	entries, err := os.ReadDir(bs.dataDir)
 	if err != nil {

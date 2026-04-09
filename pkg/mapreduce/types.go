@@ -10,6 +10,12 @@ type Reducer interface {
 	Reduce(key string, values []string, emit func(key, value string))
 }
 
+// Combiner optionally pre-aggregates map output before shuffle.
+// Runs on the mapper side to reduce shuffle volume.
+type Combiner interface {
+	Combine(key string, values []string, emit func(key, value string))
+}
+
 // Partitioner determines which reducer receives a given key.
 type Partitioner interface {
 	Partition(key string, numReducers int) int
@@ -55,6 +61,7 @@ type JobConfig struct {
 	NumReducers    int
 	MapperName     string // Built-in mapper name (e.g., "wordcount")
 	ReducerName    string // Built-in reducer name
+	CombinerName   string // Optional combiner name (reduces shuffle volume)
 	SortBufferMB   int
 	MaxTaskRetries int // Max retry attempts per task (default 3)
 }

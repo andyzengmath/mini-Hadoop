@@ -32,10 +32,11 @@ func NewServer(cfg config.Config) *Server {
 }
 
 // Start begins background goroutines for heartbeat monitoring and re-replication.
-func (s *Server) Start() {
+func (s *Server) Start() error {
 	go s.heartbeatMonitor()
 	go s.metadataDumper()
 	slog.Info("NameNode background tasks started")
+	return nil
 }
 
 // Stop halts background goroutines and saves state.
@@ -83,6 +84,42 @@ func (s *Server) metadataDumper() {
 			return
 		}
 	}
+}
+
+// GetMetrics returns NameNode metrics for the metrics server.
+func (s *Server) GetMetrics() map[string]interface{} {
+	total, alive := s.bm.GetDataNodeCount()
+	s.ns.mu.RLock()
+	nsSize := countNodes(s.ns.root)
+	s.ns.mu.RUnlock()
+
+	s.bm.mu.RLock()
+	totalBlocks := len(s.bm.blocks)
+	underReplicated := 0
+	for _, meta := range s.bm.blocks {
+		if meta.IsUnderReplicated() {
+			underReplicated++
+		}
+	}
+	s.bm.mu.RUnlock()
+
+	return map[string]interface{}{
+		"total_datanodes":       total,
+		"alive_datanodes":       alive,
+		"total_blocks":          totalBlocks,
+		"under_replicated":      underReplicated,
+		"namespace_entries":     nsSize,
+	}
+}
+
+func countNodes(node *FSNode) int {
+	count := 1
+	if node.IsDir {
+		for _, child := range node.Children {
+			count += countNodes(child)
+		}
+	}
+	return count
 }
 
 // --- gRPC method implementations ---
@@ -236,6 +273,7 @@ func (s *Server) RegisterDataNode(_ context.Context, req *pb.RegisterDataNodeReq
 func (s *Server) Heartbeat(_ context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
 	cmds, err := s.bm.ProcessHeartbeat(req.NodeId, req.UsedBytes, req.AvailableBytes, req.NumBlocks)
 	if err != nil {
+		slog.Warn("heartbeat processing failed", "nodeID", req.NodeId, "error", err)
 		return &pb.HeartbeatResponse{}, nil
 	}
 

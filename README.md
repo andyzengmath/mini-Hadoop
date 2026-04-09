@@ -1,80 +1,73 @@
 # mini-Hadoop
 
-A minimal, high-performance distributed computing framework in Go that implements the core architectural primitives of Apache Hadoop: distributed fault-tolerant storage (HDFS-like), parallel data-local batch processing (MapReduce), and decoupled resource management (YARN-lite).
+A high-performance distributed computing framework in Go that reimplements the core architectural primitives of Apache Hadoop. Built via AI-native codebase rebuild — extracting essential features from Hadoop's 201K-node codegraph and reimplementing them in ~24K lines of Go.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         mini-Hadoop Cluster                         │
-│                                                                     │
-│  ┌──────────────┐    ┌──────────────────┐    ┌───────────────────┐ │
-│  │  NameNode    │    │ ResourceManager   │    │  Client CLI       │ │
-│  │  (metadata)  │    │ (FIFO scheduler)  │    │  (file ops + jobs)│ │
-│  └──────┬───────┘    └────────┬─────────┘    └─────────┬─────────┘ │
-│         │ gRPC                │ gRPC                   │ gRPC      │
-│  ┌──────┴─────────────────────┴────────────────────────┴─────────┐ │
-│  │                    Worker Nodes (N nodes)                      │ │
-│  │  ┌────────────┐  ┌─────────────┐  ┌─────────────────────┐    │ │
-│  │  │ DataNode   │  │ NodeManager │  │ ApplicationMaster   │    │ │
-│  │  │ (blocks)   │  │ (containers)│  │ (per-job, dynamic)  │    │ │
-│  │  └────────────┘  └─────────────┘  └─────────────────────┘    │ │
-│  └───────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          mini-Hadoop Cluster                            │
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────────┐  ┌────────────────────────┐   │
+│  │  NameNode    │  │ ResourceManager   │  │  Web Dashboards        │   │
+│  │  (metadata)  │  │ (capacity sched.) │  │  :9100 (NN) :9110 (RM)│   │
+│  │  + HA standby│  │ + queue mgmt      │  │  /metrics  /health     │   │
+│  └──────┬───────┘  └────────┬─────────┘  └────────────────────────┘   │
+│         │ gRPC              │ gRPC                                      │
+│  ┌──────┴───────────────────┴──────────────────────────────────────┐   │
+│  │                     Worker Nodes (N nodes)                       │   │
+│  │  ┌────────────┐  ┌─────────────┐  ┌──────────────────────┐     │   │
+│  │  │ DataNode   │  │ NodeManager │  │ ApplicationMaster    │     │   │
+│  │  │ (blocks)   │  │ (containers)│  │ (MR or DAG engine)   │     │   │
+│  │  └────────────┘  └─────────────┘  └──────────────────────┘     │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Three-Layer Design
+## Features
 
-1. **Storage Layer (HDFS-lite)** - NameNode manages namespace + block mapping; DataNodes store 128MB block replicas with 3x pipelined replication
-2. **Resource Management (YARN-lite)** - ResourceManager with FIFO scheduler; NodeManagers launch containers as OS processes
-3. **Processing (MapReduce)** - Input splitting aligned to HDFS blocks, in-memory sort/spill, shuffle across reducers, data-local task scheduling
+### Core (Phase 1)
+- **HDFS-lite**: Distributed block storage with 3x pipelined replication, streaming writes, heartbeat-based fault detection, automatic re-replication
+- **YARN-lite**: Resource management with capacity scheduler (queue-based multi-tenancy), locality-aware container allocation
+- **MapReduce**: Parallel batch processing with sort/spill, shuffle, combiner support, WordCount/SumByKey built-in jobs
+- **6 gRPC services**: NameNode, DataNode, ResourceManager, NodeManager, Shuffle, common types
+- **7 binaries**: namenode, datanode, resourcemanager, nodemanager, hdfs CLI, mapreduce CLI, mapworker
 
-### Communication
+### Advanced (Phase 2)
+- **HA NameNode**: Write-ahead edit log (WAL), leader election with pluggable backend (ZooKeeper/local), fencing tokens
+- **Capacity Scheduler**: Multi-queue resource management with min/max capacity percentages, elastic bursting
+- **Erasure Coding**: Reed-Solomon RS-6-3 (1.5x storage overhead vs 3x for replication, same fault tolerance)
+- **Block Compression**: Gzip codec with CompressBlock/DecompressBlock (99.2% compression on repetitive text)
+- **DAG Engine**: Spark-like RDD abstraction with Map, FlatMap, Filter, ReduceByKey, GroupByKey, DAG scheduler with stage splitting at shuffle boundaries
+- **Raw TCP Transport**: Custom wire protocol behind BlockTransport interface for maximum block transfer throughput
+- **Short-Circuit Reads**: Bypass DataNode gRPC for co-located data (direct local disk read)
+- **Ack-Queue Pipeline**: Dual-queue pattern for pipeline write reliability with drain-and-retry on failure
+- **Web Dashboard**: Auto-refreshing HTML UI for NameNode and ResourceManager metrics
+- **Metrics Endpoints**: JSON `/metrics` and `/health` HTTP endpoints
 
-All inter-component communication via gRPC with Protocol Buffers (6 service definitions).
+### Security
+- Command allowlist for NodeManager process execution
+- Path traversal protection on block storage and container directories
+- Non-root Docker containers
+- Localhost-only port publishing
 
 ## Quick Start
 
 ### Prerequisites
-
 - Go 1.23+
-- protoc (Protocol Buffers compiler)
-- protoc-gen-go, protoc-gen-go-grpc
+- Docker + Docker Compose (for cluster testing)
 
 ### Build
 
 ```bash
-# Generate proto code
-make proto
-
-# Build all binaries
+# Build all 7 binaries
 make build
 
-# Run unit tests
+# Run all 136 unit + acceptance tests
 make test
 
-# Run tests with race detector
+# Run with race detector
 make test-race
-```
-
-### Run Locally (single machine, multiple processes)
-
-```bash
-# Terminal 1: Start NameNode
-./bin/namenode --port 9000
-
-# Terminal 2: Start ResourceManager
-./bin/resourcemanager --port 9010
-
-# Terminal 3-5: Start workers (DataNode + NodeManager each)
-./bin/datanode --id worker-1 --port 9001 &
-./bin/nodemanager --id worker-1 --port 9011
-
-# Terminal 6: Use HDFS CLI
-./bin/hdfs mkdir /data
-./bin/hdfs put ./local-file.txt /data/file.txt
-./bin/hdfs ls /data
-./bin/hdfs get /data/file.txt ./downloaded.txt
 ```
 
 ### Run with Docker Compose
@@ -84,72 +77,147 @@ make test-race
 make docker-build
 make docker-up
 
-# Run acceptance tests
-make docker-test
+# Test HDFS operations
+docker compose -f docker/docker-compose.yml exec client sh -c "
+  hdfs mkdir /data
+  echo 'hello world' > /tmp/test.txt
+  hdfs put /tmp/test.txt /data/hello.txt
+  hdfs ls /data
+  hdfs get /data/hello.txt /tmp/downloaded.txt
+  cat /tmp/downloaded.txt
+"
+
+# Run MapReduce WordCount
+docker compose -f docker/docker-compose.yml exec client sh -c "
+  mapreduce --job wordcount --input /tmp/test.txt --output /tmp/wc --local
+"
+
+# View dashboards (from inside network)
+docker compose -f docker/docker-compose.yml exec client sh -c "
+  curl -s http://namenode:9100/metrics
+  curl -s http://resourcemanager:9110/metrics
+"
 
 # Stop cluster
 make docker-down
+```
+
+### Run Locally
+
+```bash
+# Terminal 1: NameNode (dashboard at localhost:9100)
+./bin/namenode --port 9000
+
+# Terminal 2: ResourceManager (dashboard at localhost:9110)
+./bin/resourcemanager --port 9010
+
+# Terminal 3: Worker
+./bin/datanode --id worker-1 --port 9001 &
+./bin/nodemanager --id worker-1 --port 9011
+
+# Terminal 4: Use HDFS
+./bin/hdfs mkdir /data
+./bin/hdfs put ./local-file.txt /data/file.txt
+./bin/hdfs ls /data
+./bin/hdfs get /data/file.txt ./downloaded.txt
+```
+
+### DAG Engine (Spark-like)
+
+```go
+import "github.com/mini-hadoop/mini-hadoop/pkg/dagengine"
+
+lines := dagengine.NewRDDFromLines(textLines, 4)
+words := lines.FlatMap(splitWords)
+counts := words.ReduceByKey(sumInts)
+result := counts.Collect()
 ```
 
 ## Project Structure
 
 ```
 mini-hadoop/
-├── cmd/                    # Binary entry points
-│   ├── namenode/           # NameNode server
-│   ├── datanode/           # DataNode server
-│   ├── resourcemanager/    # ResourceManager server
-│   ├── nodemanager/        # NodeManager server
-│   ├── hdfs/               # HDFS client CLI
-│   └── mapreduce/          # MapReduce job submission CLI
-├── proto/                  # Protocol Buffer definitions (6 services)
-├── pkg/                    # Core library packages
-│   ├── namenode/           # Namespace, block manager, persistence
-│   ├── datanode/           # Block storage, pipeline replication
-│   ├── hdfs/               # HDFS client library
-│   ├── resourcemanager/    # FIFO scheduler, container allocation
-│   ├── nodemanager/        # Container lifecycle (OS processes)
-│   ├── mapreduce/          # MR engine: types, sort, shuffle, jobs
-│   ├── block/              # Block abstraction, checksums
-│   ├── config/             # Configuration management
-│   └── rpc/                # gRPC helpers, BlockTransport interface
-├── test/
-│   └── acceptance/         # Acceptance tests (AC-1 through AC-7)
-├── docker/                 # Dockerfile + docker-compose.yml
-├── go.mod
-└── Makefile
+├── cmd/                         # 7 binary entry points
+│   ├── namenode/                # NameNode server
+│   ├── datanode/                # DataNode server
+│   ├── resourcemanager/         # ResourceManager server
+│   ├── nodemanager/             # NodeManager server
+│   ├── hdfs/                    # HDFS client CLI
+│   ├── mapreduce/               # MapReduce job submission CLI
+│   └── mapworker/               # Map/reduce task binary
+├── proto/                       # 6 gRPC service definitions
+├── pkg/
+│   ├── namenode/                # Namespace, block mgr, persistence, edit log, election
+│   ├── datanode/                # Block storage, pipeline replication
+│   ├── hdfs/                    # Client library, ack queue
+│   ├── resourcemanager/         # Capacity scheduler, queues
+│   ├── nodemanager/             # Container lifecycle, security
+│   ├── mapreduce/               # MR engine, sort/spill, shuffle, AppMaster, combiner
+│   ├── dagengine/               # Spark-like RDD + DAG scheduler
+│   ├── block/                   # Block abstraction, checksums, compression, erasure coding
+│   ├── config/                  # Configuration (JSON + env vars)
+│   └── rpc/                     # gRPC helpers, TCP transport, metrics, dashboard
+├── test/acceptance/             # 7 acceptance tests
+├── docker/                      # Dockerfile + docker-compose.yml
+└── doc/                         # Design docs, reports, plans
 ```
 
-## Key Algorithms
+## Test Results
 
-- **Pipeline Replication**: Client streams data to DN1, which forwards to DN2, which forwards to DN3 (pipelined, not broadcast)
-- **Heartbeat Monitoring**: DataNodes send heartbeats every 3s; NameNode marks dead after 10s timeout and triggers re-replication
-- **Block Placement**: 3 replicas on 3 different nodes, sorted by available capacity
-- **FIFO Scheduler**: Container requests allocated in order, with locality preference (prefer nodes holding input blocks)
-- **Sort/Spill**: Map output buffered in memory, sorted by (partition, key), spilled to disk at 80% threshold, merged into per-partition files
-- **Shuffle**: Reducers fetch their assigned partitions from all mapper nodes, merge-sort, group by key
+**136 tests, all passing with race detector:**
 
-## Acceptance Criteria
+| Package | Tests | Coverage |
+|---------|-------|----------|
+| pkg/block | 24 | Block IDs, checksums, compression, erasure coding |
+| pkg/config | 7 | Config load/save, env var overrides |
+| pkg/dagengine | 12 | RDD ops, WordCount pipeline, DAG scheduler |
+| pkg/datanode | 10 | Block storage, path traversal protection |
+| pkg/hdfs | 6 | Ack queue lifecycle |
+| pkg/mapreduce | 7 | WordCount, sort buffer, partitioner |
+| pkg/namenode | 41 | Namespace, block mgr, persistence, edit log |
+| pkg/nodemanager | 8 | Command allowlist, arg validation |
+| pkg/resourcemanager | 16 | FIFO scheduler, queues, locality |
+| test/acceptance | 7 | File I/O, replication, WordCount, shuffle |
 
-| # | Test | Status |
-|---|------|--------|
-| AC-1 | File Write/Read with SHA-256 verification | Tested |
-| AC-2 | Block replication recovery within 30s | Docker required |
-| AC-3 | WordCount correctness vs reference | PASS |
-| AC-4 | Data locality >70% map tasks | Docker required |
-| AC-5 | Node failure mid-job, job completes | Docker required |
-| AC-6 | Shuffle correctness (1000 keys, multi-reducer) | PASS |
-| AC-7 | Linear scaling within 30% of ideal | Docker required |
+## Docker Cluster Verification
 
-## Design Decisions (ADRs)
+| Test | Result |
+|------|--------|
+| AC-1: File Write/Read (67MB, SHA-256) | PASS |
+| AC-2: Replication Recovery (worker killed, 11s detection) | PASS |
+| AC-3: WordCount (3.6M words, matches reference) | PASS |
+| AC-6: SumByKey (10K keys, all sums correct) | PASS |
+| AC-7: Throughput Baseline | PASS |
+| Distributed MapReduce (2 reducers, 100K words) | PASS |
+| NameNode metrics dashboard | PASS |
+| ResourceManager metrics dashboard | PASS |
 
-1. **Block Transport**: gRPC streaming (not raw TCP) with BlockTransport interface for future swap
-2. **NameNode Crash**: Recovery is a non-goal; periodic JSON state dump only
-3. **AM Crash**: Recovery is a non-goal; job marked FAILED if AM dies
-4. **Container Limits**: Advisory only (no OS-level enforcement via cgroups)
+## Configuration
 
-## Specification
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `MINIHADOOP_NAMENODE_HOST` | localhost | NameNode hostname |
+| `MINIHADOOP_NAMENODE_PORT` | 9000 | NameNode gRPC port |
+| `MINIHADOOP_RM_HOST` | localhost | ResourceManager hostname |
+| `MINIHADOOP_RM_PORT` | 9010 | ResourceManager gRPC port |
+| `MINIHADOOP_HOSTNAME` | os.Hostname() | Service registration hostname |
+| `MINIHADOOP_DATA_DIR` | /tmp/minihadoop/datanode | Block storage directory |
+| `MINIHADOOP_TEMP_DIR` | /tmp/minihadoop/temp | Temporary files |
 
-Full specification and consensus plan:
-- Spec: `.omc/specs/deep-interview-mini-hadoop.md`
-- Plan: `.omc/plans/mini-hadoop-consensus-plan.md`
+## Documentation
+
+- **[Comprehensive Technical Report](doc/mini-hadoop-comprehensive-report.md)** — Full architecture analysis, data flow diagrams, algorithms, verification results
+- **[Phase 2 Implementation Plan](doc/phase2-plan.md)** — Detailed specs for all advanced features
+- **[Next Stage Plan](doc/next-stage-plan.md)** — Original roadmap from Phase 1
+
+## Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Language | Go | Near-Java performance + AI-friendly + goroutines |
+| Communication | gRPC + protobuf | Strongly typed, efficient, natural for Go |
+| Block transport | gRPC streaming + raw TCP option | BlockTransport interface allows swapping |
+| Replication | 3x pipelined + RS-6-3 erasure coding | Standard + storage-efficient option |
+| Scheduler | Capacity (queue-based) | Multi-tenant with elastic bursting |
+| Processing | MapReduce + DAG engine | Batch + Spark-like in-memory |
+| HA | Edit log WAL + leader election | Pluggable backend (ZooKeeper/local) |

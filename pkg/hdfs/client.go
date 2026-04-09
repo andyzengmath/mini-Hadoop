@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
 	"github.com/mini-hadoop/mini-hadoop/pkg/block"
 	"github.com/mini-hadoop/mini-hadoop/pkg/config"
@@ -18,9 +19,10 @@ import (
 
 // Client provides HDFS file operations.
 type Client struct {
-	cfg        config.Config
-	nnConn     *grpc.ClientConn
-	nnClient   pb.NameNodeServiceClient
+	cfg          config.Config
+	nnConn       *grpc.ClientConn
+	nnClient     pb.NameNodeServiceClient
+	localDataDir string // If set, enables short-circuit local reads
 }
 
 // NewClient creates a new HDFS client connected to the NameNode.
@@ -31,9 +33,10 @@ func NewClient(cfg config.Config) (*Client, error) {
 	}
 
 	return &Client{
-		cfg:      cfg,
-		nnConn:   conn,
-		nnClient: pb.NewNameNodeServiceClient(conn),
+		cfg:          cfg,
+		nnConn:       conn,
+		nnClient:     pb.NewNameNodeServiceClient(conn),
+		localDataDir: cfg.DataDir, // Enables short-circuit local reads if co-located with DataNode
 	}, nil
 }
 
@@ -110,7 +113,8 @@ func (c *Client) CreateFile(path string, data io.Reader, replication int32) erro
 			return fmt.Errorf("empty pipeline for block %s", blockID)
 		}
 
-		if writeErr := c.writeBlockToPipeline(blockID, blockBuf, pipeline, buf); writeErr != nil {
+		genStamp := addResp.Block.GenerationStamp
+		if writeErr := c.writeBlockToPipeline(blockID, genStamp, blockBuf, pipeline, buf); writeErr != nil {
 			return fmt.Errorf("write block %s: %w", blockID, writeErr)
 		}
 
@@ -139,7 +143,7 @@ func (c *Client) CreateFile(path string, data io.Reader, replication int32) erro
 }
 
 // writeBlockToPipeline sends block data to the first DataNode in the pipeline.
-func (c *Client) writeBlockToPipeline(blockID string, data *bytes.Buffer, pipeline []string, chunkBuf []byte) error {
+func (c *Client) writeBlockToPipeline(blockID string, genStamp int64, data *bytes.Buffer, pipeline []string, chunkBuf []byte) error {
 	conn, err := rpc.Dial(pipeline[0])
 	if err != nil {
 		return fmt.Errorf("connect to DataNode %s: %w", pipeline[0], err)
@@ -157,7 +161,7 @@ func (c *Client) writeBlockToPipeline(blockID string, data *bytes.Buffer, pipeli
 		Payload: &pb.WriteBlockRequest_Header{
 			Header: &pb.WriteBlockHeader{
 				BlockId:         blockID,
-				GenerationStamp: 1,
+				GenerationStamp: genStamp,
 				Pipeline:        pipeline,
 				PipelineIndex:   0,
 			},
@@ -237,8 +241,27 @@ func (c *Client) ReadFile(path string, writer io.Writer) error {
 
 // readBlockFromDataNode reads a block from the first available DataNode.
 // It buffers each attempt to prevent partial writes on failure, and verifies
-// the checksum if available.
+// the checksum if available. Attempts short-circuit local read first.
 func (c *Client) readBlockFromDataNode(blockInfo *pb.BlockInfo, writer io.Writer) error {
+	// Short-circuit local read: if we're co-located with a DataNode,
+	// read the block directly from local disk (bypasses network entirely).
+	if c.localDataDir != "" {
+		localPath := c.localDataDir + "/" + blockInfo.BlockId + ".blk"
+		if data, err := os.ReadFile(localPath); err == nil {
+			if len(blockInfo.Checksum) > 0 && !block.VerifyChecksum(data, blockInfo.Checksum) {
+				slog.Warn("short-circuit read checksum mismatch, falling back to network",
+					"blockID", blockInfo.BlockId)
+			} else {
+				if _, writeErr := writer.Write(data); writeErr != nil {
+					return writeErr
+				}
+				slog.Debug("short-circuit local read", "blockID", blockInfo.BlockId)
+				return nil
+			}
+		}
+		// Local file not found — fall through to network read
+	}
+
 	var lastErr error
 
 	for _, addr := range blockInfo.Locations {

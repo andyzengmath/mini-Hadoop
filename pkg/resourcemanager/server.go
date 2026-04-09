@@ -29,9 +29,10 @@ func NewServer(cfg config.Config) *Server {
 }
 
 // Start begins background monitoring.
-func (s *Server) Start() {
+func (s *Server) Start() error {
 	go s.nodeMonitor()
 	slog.Info("ResourceManager started")
+	return nil
 }
 
 // Stop halts background tasks.
@@ -51,6 +52,41 @@ func (s *Server) nodeMonitor() {
 		case <-s.stopCh:
 			return
 		}
+	}
+}
+
+// GetMetrics returns ResourceManager metrics for the metrics server.
+func (s *Server) GetMetrics() map[string]interface{} {
+	s.scheduler.mu.Lock()
+	totalNodes := len(s.scheduler.nodes)
+	aliveNodes := 0
+	totalMem := int32(0)
+	usedMem := int32(0)
+	for _, n := range s.scheduler.nodes {
+		if n.Alive {
+			aliveNodes++
+		}
+		totalMem += n.TotalMemoryMB
+		usedMem += n.UsedMemoryMB
+	}
+	runningApps := 0
+	totalApps := len(s.scheduler.apps)
+	for _, a := range s.scheduler.apps {
+		if a.State == "RUNNING" {
+			runningApps++
+		}
+	}
+	pendingRequests := len(s.scheduler.pending)
+	s.scheduler.mu.Unlock()
+
+	return map[string]interface{}{
+		"total_nodes":      totalNodes,
+		"alive_nodes":      aliveNodes,
+		"total_memory_mb":  totalMem,
+		"used_memory_mb":   usedMem,
+		"running_apps":     runningApps,
+		"total_apps":       totalApps,
+		"pending_requests": pendingRequests,
 	}
 }
 
