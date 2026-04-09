@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package minihadoop;
+
+option go_package = "github.com/mini-hadoop/mini-hadoop/proto";
+
+service DataNodeService {
+  // ReadBlock streams block data from DataNode to client.
+  rpc ReadBlock(ReadBlockRequest) returns (stream DataChunk);
+
+  // WriteBlock receives block data and optionally forwards to next in pipeline.
+  rpc WriteBlock(stream WriteBlockRequest) returns (WriteBlockResponse);
+
+  // DeleteBlock removes a block from local storage.
+  rpc DeleteBlock(DeleteBlockRequest) returns (DeleteBlockResponse);
+
+  // TransferBlock copies a block from another DataNode (for re-replication).
+  rpc TransferBlock(TransferBlockRequest) returns (TransferBlockResponse);
+}
+
+message ReadBlockRequest {
+  string block_id = 1;
+  int64 offset = 2;  // Read from this offset within the block
+  int64 length = 3;  // 0 = read entire block
+}
+
+// DataChunk is a piece of block data (1MB chunks for streaming).
+message DataChunk {
+  bytes data = 1;
+  int64 offset = 2;
+  bytes checksum = 3;  // Per-chunk checksum for integrity verification
+  bool is_last = 4;
+}
+
+message WriteBlockRequest {
+  oneof payload {
+    WriteBlockHeader header = 1;  // First message: metadata
+    DataChunk chunk = 2;          // Subsequent messages: data chunks
+  }
+}
+
+message WriteBlockHeader {
+  string block_id = 1;
+  int64 generation_stamp = 2;
+  repeated string pipeline = 3;   // Remaining DataNodes in pipeline (forwarding targets)
+  int32 pipeline_index = 4;       // This node's position in the pipeline
+}
+
+message WriteBlockResponse {
+  bool success = 1;
+  int64 bytes_written = 2;
+  bytes checksum = 3;      // SHA-256 of the entire block
+  string error = 4;
+}
+
+message DeleteBlockRequest {
+  string block_id = 1;
+}
+
+message DeleteBlockResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message TransferBlockRequest {
+  string block_id = 1;
+  string source_address = 2;  // DataNode address to copy from
+}
+
+message TransferBlockResponse {
+  bool success = 1;
+  int64 bytes_transferred = 2;
+  string error = 3;
+}

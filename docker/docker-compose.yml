@@ -1,0 +1,155 @@
+version: "3.8"
+
+services:
+  namenode:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: namenode --port 9000
+    ports:
+      - "9000:9000"
+    volumes:
+      - nn-data:/data/namenode
+    environment:
+      - MINIHADOOP_NAMENODE_HOST=namenode
+      - MINIHADOOP_NAMENODE_PORT=9000
+    # gRPC server has no HTTP endpoint; use simple TCP check
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo > /dev/tcp/localhost/9000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - hadoop
+
+  resourcemanager:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: resourcemanager --port 9010
+    ports:
+      - "9010:9010"
+    environment:
+      - MINIHADOOP_RM_HOST=resourcemanager
+      - MINIHADOOP_RM_PORT=9010
+    depends_on:
+      - namenode
+    networks:
+      - hadoop
+
+  worker-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: >
+      sh -c "
+        datanode --id worker-1 --port 9001 &
+        sleep 2 &&
+        nodemanager --id worker-1 --port 9011 &
+        wait
+      "
+    volumes:
+      - w1-data:/data/datanode
+      - w1-temp:/data/temp
+    environment:
+      - MINIHADOOP_HOSTNAME=worker-1
+      - MINIHADOOP_NAMENODE_HOST=namenode
+      - MINIHADOOP_NAMENODE_PORT=9000
+      - MINIHADOOP_RM_HOST=resourcemanager
+      - MINIHADOOP_RM_PORT=9010
+      - MINIHADOOP_DATANODE_PORT=9001
+      - MINIHADOOP_NM_PORT=9011
+    depends_on:
+      - namenode
+      - resourcemanager
+    networks:
+      - hadoop
+
+  worker-2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: >
+      sh -c "
+        datanode --id worker-2 --port 9001 &
+        sleep 2 &&
+        nodemanager --id worker-2 --port 9011 &
+        wait
+      "
+    volumes:
+      - w2-data:/data/datanode
+      - w2-temp:/data/temp
+    environment:
+      - MINIHADOOP_HOSTNAME=worker-2
+      - MINIHADOOP_NAMENODE_HOST=namenode
+      - MINIHADOOP_NAMENODE_PORT=9000
+      - MINIHADOOP_RM_HOST=resourcemanager
+      - MINIHADOOP_RM_PORT=9010
+      - MINIHADOOP_DATANODE_PORT=9001
+      - MINIHADOOP_NM_PORT=9011
+    depends_on:
+      - namenode
+      - resourcemanager
+    networks:
+      - hadoop
+
+  worker-3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: >
+      sh -c "
+        datanode --id worker-3 --port 9001 &
+        sleep 2 &&
+        nodemanager --id worker-3 --port 9011 &
+        wait
+      "
+    volumes:
+      - w3-data:/data/datanode
+      - w3-temp:/data/temp
+    environment:
+      - MINIHADOOP_HOSTNAME=worker-3
+      - MINIHADOOP_NAMENODE_HOST=namenode
+      - MINIHADOOP_NAMENODE_PORT=9000
+      - MINIHADOOP_RM_HOST=resourcemanager
+      - MINIHADOOP_RM_PORT=9010
+      - MINIHADOOP_DATANODE_PORT=9001
+      - MINIHADOOP_NM_PORT=9011
+    depends_on:
+      - namenode
+      - resourcemanager
+    networks:
+      - hadoop
+
+  client:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: sleep infinity
+    environment:
+      - MINIHADOOP_NAMENODE_HOST=namenode
+      - MINIHADOOP_NAMENODE_PORT=9000
+      - MINIHADOOP_RM_HOST=resourcemanager
+      - MINIHADOOP_RM_PORT=9010
+    depends_on:
+      - namenode
+      - resourcemanager
+      - worker-1
+      - worker-2
+      - worker-3
+    networks:
+      - hadoop
+
+volumes:
+  nn-data:
+  w1-data:
+  w2-data:
+  w3-data:
+  w1-temp:
+  w2-temp:
+  w3-temp:
+
+networks:
+  hadoop:
+    driver: bridge

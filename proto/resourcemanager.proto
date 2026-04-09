@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package minihadoop;
+
+option go_package = "github.com/mini-hadoop/mini-hadoop/proto";
+
+import "proto/common.proto";
+
+service ResourceManagerService {
+  // Application lifecycle
+  rpc SubmitApplication(SubmitApplicationRequest) returns (SubmitApplicationResponse);
+  rpc GetApplicationReport(GetApplicationReportRequest) returns (GetApplicationReportResponse);
+  rpc KillApplication(KillApplicationRequest) returns (KillApplicationResponse);
+
+  // Container management (called by ApplicationMaster)
+  rpc AllocateContainers(AllocateContainersRequest) returns (AllocateContainersResponse);
+  rpc ReleaseContainers(ReleaseContainersRequest) returns (ReleaseContainersResponse);
+
+  // NodeManager registration and heartbeats
+  rpc RegisterNodeManager(RegisterNodeManagerRequest) returns (RegisterNodeManagerResponse);
+  rpc NodeManagerHeartbeat(NodeManagerHeartbeatRequest) returns (NodeManagerHeartbeatResponse);
+}
+
+// --- Application lifecycle ---
+
+message SubmitApplicationRequest {
+  string application_type = 1;    // e.g., "mapreduce"
+  string am_binary_path = 2;      // Path to ApplicationMaster binary
+  repeated string am_args = 3;    // Arguments for the AM binary
+  int32 am_memory_mb = 4;         // Memory for AM container
+  int32 am_cpu_vcores = 5;        // CPU for AM container
+  map<string, string> am_env = 6; // Environment variables for AM
+}
+
+message SubmitApplicationResponse {
+  string app_id = 1;
+  string error = 2;
+}
+
+message GetApplicationReportRequest {
+  string app_id = 1;
+}
+
+message GetApplicationReportResponse {
+  ApplicationStatus status = 1;
+  string error = 2;
+}
+
+message KillApplicationRequest {
+  string app_id = 1;
+}
+
+message KillApplicationResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// --- Container management ---
+
+message AllocateContainersRequest {
+  string app_id = 1;
+  repeated ContainerRequest requests = 2;
+}
+
+message ContainerRequest {
+  int32 memory_mb = 1;
+  int32 cpu_vcores = 2;
+  LocalityPreference locality = 3;
+  int32 count = 4;                  // Number of containers with these specs
+  string request_id = 5;            // Caller's tracking ID
+}
+
+message AllocateContainersResponse {
+  repeated ContainerSpec containers = 1;
+  string error = 2;
+}
+
+message ReleaseContainersRequest {
+  string app_id = 1;
+  repeated string container_ids = 2;
+}
+
+message ReleaseContainersResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// --- NodeManager management ---
+
+message RegisterNodeManagerRequest {
+  string node_id = 1;
+  string address = 2;
+  int32 total_memory_mb = 3;
+  int32 total_cpu = 4;
+}
+
+message RegisterNodeManagerResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message NodeManagerHeartbeatRequest {
+  string node_id = 1;
+  NodeStatus status = 2;
+  repeated ContainerStatusReport container_statuses = 3;
+}
+
+message ContainerStatusReport {
+  string container_id = 1;
+  ContainerState state = 2;
+  int32 exit_code = 3;
+  string diagnostics = 4;
+}
+
+// ContainerState is defined in common.proto
+
+message NodeManagerHeartbeatResponse {
+  repeated ContainerAction actions = 1;
+}
+
+message ContainerAction {
+  ContainerActionType type = 1;
+  string container_id = 2;
+}
+
+enum ContainerActionType {
+  CONTAINER_ACTION_UNSPECIFIED = 0;
+  KILL_CONTAINER = 1;
+}
