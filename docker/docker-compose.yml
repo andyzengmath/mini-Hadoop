@@ -13,6 +13,7 @@ services:
     environment:
       - MINIHADOOP_NAMENODE_HOST=namenode
       - MINIHADOOP_NAMENODE_PORT=9000
+      - MINIHADOOP_METADATA_DIR=/data/namenode
     # gRPC server has no HTTP endpoint; use simple TCP check
     healthcheck:
       test: ["CMD", "sh", "-c", "echo > /dev/tcp/localhost/9000"]
@@ -60,6 +61,8 @@ services:
       - MINIHADOOP_RM_PORT=9010
       - MINIHADOOP_DATANODE_PORT=9001
       - MINIHADOOP_NM_PORT=9011
+      - MINIHADOOP_DATA_DIR=/data/datanode
+      - MINIHADOOP_TEMP_DIR=/data/temp
     depends_on:
       - namenode
       - resourcemanager
@@ -88,6 +91,8 @@ services:
       - MINIHADOOP_RM_PORT=9010
       - MINIHADOOP_DATANODE_PORT=9001
       - MINIHADOOP_NM_PORT=9011
+      - MINIHADOOP_DATA_DIR=/data/datanode
+      - MINIHADOOP_TEMP_DIR=/data/temp
     depends_on:
       - namenode
       - resourcemanager
@@ -116,6 +121,8 @@ services:
       - MINIHADOOP_RM_PORT=9010
       - MINIHADOOP_DATANODE_PORT=9001
       - MINIHADOOP_NM_PORT=9011
+      - MINIHADOOP_DATA_DIR=/data/datanode
+      - MINIHADOOP_TEMP_DIR=/data/temp
     depends_on:
       - namenode
       - resourcemanager
