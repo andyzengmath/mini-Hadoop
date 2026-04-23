@@ -58,6 +58,29 @@ func NewBlockManager(defaultReplication int32, deadNodeTimeout time.Duration) *B
 	}
 }
 
+// Restore loads previously persisted block metadata and DataNode registrations.
+// DataNodes are restored as initially dead — they become alive when their first heartbeat
+// arrives after restart. This avoids incorrectly treating pre-restart addresses as live targets
+// for block allocation before the real DNs have reconnected.
+func (bm *BlockManager) Restore(blocks map[string]*block.Metadata, datanodes map[string]*DataNodeInfo) {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	if blocks != nil {
+		for id, meta := range blocks {
+			copied := *meta
+			bm.blocks[id] = &copied
+		}
+	}
+	if datanodes != nil {
+		for id, dn := range datanodes {
+			copied := *dn
+			copied.Alive = false // wait for heartbeat to confirm liveness
+			bm.datanodes[id] = &copied
+		}
+	}
+}
+
 // RegisterDataNode registers a new DataNode with the cluster.
 func (bm *BlockManager) RegisterDataNode(nodeID, address string, capacity int64) error {
 	bm.mu.Lock()

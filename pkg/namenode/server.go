@@ -2,6 +2,7 @@ package namenode
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -35,6 +36,24 @@ func NewServer(cfg config.Config) *Server {
 
 // Start begins background goroutines for heartbeat monitoring and re-replication.
 func (s *Server) Start() error {
+	// Restore previously persisted state before starting background tasks.
+	// Without this, every NameNode restart begins with an empty namespace — files written
+	// in a prior run are no longer visible to clients and writes fail with "not enough DataNodes"
+	// until DNs re-register (see fix for heartbeat auto re-register).
+	state, err := LoadState(s.cfg.MetadataDir)
+	if err != nil {
+		return fmt.Errorf("load state: %w", err)
+	}
+	if state != nil {
+		s.ns = RestoreNamespace(state.Namespace)
+		s.bm.Restore(state.Blocks, state.DataNodes)
+		slog.Info("NameNode state restored",
+			"blocks", len(state.Blocks),
+			"datanodes", len(state.DataNodes),
+			"timestamp", state.Timestamp,
+		)
+	}
+
 	// Initialize edit log (WAL)
 	el, err := NewEditLog(s.cfg.MetadataDir)
 	if err != nil {
@@ -312,8 +331,11 @@ func (s *Server) RegisterDataNode(_ context.Context, req *pb.RegisterDataNodeReq
 func (s *Server) Heartbeat(_ context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
 	cmds, err := s.bm.ProcessHeartbeat(req.NodeId, req.UsedBytes, req.AvailableBytes, req.NumBlocks)
 	if err != nil {
+		// Return the error so the DataNode can react (e.g. re-register after NameNode restart
+		// when it no longer knows this node). Previously the error was swallowed, leaving DNs
+		// unable to discover that the NameNode had forgotten them.
 		slog.Warn("heartbeat processing failed", "nodeID", req.NodeId, "error", err)
-		return &pb.HeartbeatResponse{}, nil
+		return nil, err
 	}
 
 	pbCmds := make([]*pb.BlockCommand, len(cmds))

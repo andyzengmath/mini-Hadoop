@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mini-hadoop/mini-hadoop/pkg/config"
@@ -111,6 +112,16 @@ func (s *Server) sendHeartbeat() {
 		NumBlocks:      s.storage.BlockCount(),
 	})
 	if err != nil {
+		// Auto re-register when the NameNode has restarted and no longer knows this node.
+		// Without this, a restarted NN permanently sees 0 alive DataNodes even though DNs
+		// keep heartbeating — breaking writes with "not enough DataNodes" until cluster restart.
+		if strings.Contains(err.Error(), "unknown DataNode") {
+			slog.Info("NameNode does not recognize this node, re-registering", "nodeID", s.nodeID)
+			if rerr := s.reregister(); rerr != nil {
+				slog.Warn("re-registration failed", "error", rerr)
+			}
+			return
+		}
 		slog.Warn("heartbeat failed", "error", err)
 		return
 	}
@@ -119,6 +130,24 @@ func (s *Server) sendHeartbeat() {
 	for _, cmd := range resp.Commands {
 		go s.executeCommand(cmd)
 	}
+}
+
+// reregister re-sends the Register RPC, used when the NameNode has restarted
+// and no longer knows about this DataNode.
+func (s *Server) reregister() error {
+	resp, err := s.namenodeClient.RegisterDataNode(context.Background(), &pb.RegisterDataNodeRequest{
+		NodeId:        s.nodeID,
+		Address:       s.address,
+		CapacityBytes: 100 * 1024 * 1024 * 1024,
+	})
+	if err != nil {
+		return fmt.Errorf("re-register RPC: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("re-register rejected: %s", resp.Error)
+	}
+	slog.Info("re-registered with NameNode", "nodeID", s.nodeID)
+	return nil
 }
 
 func (s *Server) executeCommand(cmd *pb.BlockCommand) {
