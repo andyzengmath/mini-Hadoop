@@ -1,7 +1,6 @@
 package datanode
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -19,6 +18,15 @@ import (
 	"google.golang.org/grpc"
 )
 
+// maxConcurrentReplications caps how many replicateBlock calls can run at once.
+// Without this cap, a NameNode under-replication storm (e.g. many blocks flagged
+// under-replicated after a peer DN goes offline) spawns one goroutine per block,
+// each holding a streaming buffer + open gRPC stream — empirically observed
+// pushing worker memory to 20 GiB+ in the v2 D1 benchmark. 3 is conservative
+// but leaves enough headroom that replication doesn't become a single-threaded
+// bottleneck.
+const maxConcurrentReplications = 3
+
 // Server implements the DataNodeService gRPC interface.
 type Server struct {
 	pb.UnimplementedDataNodeServiceServer
@@ -31,7 +39,8 @@ type Server struct {
 	namenodeConn   *grpc.ClientConn
 	namenodeClient pb.NameNodeServiceClient
 
-	stopCh chan struct{}
+	replicateSem chan struct{} // bounded semaphore for replicateBlock
+	stopCh       chan struct{}
 }
 
 // NewServer creates a new DataNode server.
@@ -42,11 +51,12 @@ func NewServer(nodeID, address string, cfg config.Config) (*Server, error) {
 	}
 
 	return &Server{
-		nodeID:  nodeID,
-		address: address,
-		storage: storage,
-		cfg:     cfg,
-		stopCh:  make(chan struct{}),
+		nodeID:       nodeID,
+		address:      address,
+		storage:      storage,
+		cfg:          cfg,
+		replicateSem: make(chan struct{}, maxConcurrentReplications),
+		stopCh:       make(chan struct{}),
 	}, nil
 }
 
@@ -153,6 +163,17 @@ func (s *Server) reregister() error {
 func (s *Server) executeCommand(cmd *pb.BlockCommand) {
 	switch cmd.Type {
 	case pb.CommandType_REPLICATE:
+		// Bounded concurrency: never hold more than maxConcurrentReplications
+		// block-streams + file writes in flight. Prior to this, each REPLICATE
+		// command spawned an uncapped goroutine, letting a single NN storm push
+		// the DN to 20 GiB RSS and complete write failure under sustained load.
+		select {
+		case s.replicateSem <- struct{}{}:
+		case <-s.stopCh:
+			return
+		}
+		defer func() { <-s.replicateSem }()
+
 		if err := s.replicateBlock(cmd.BlockId, cmd.SourceNode); err != nil {
 			slog.Error("replicate command failed", "blockID", cmd.BlockId, "error", err)
 		}
@@ -163,6 +184,11 @@ func (s *Server) executeCommand(cmd *pb.BlockCommand) {
 	}
 }
 
+// replicateBlock streams a block from sourceAddr into local storage.
+// Previously this function buffered the entire block in a bytes.Buffer, which
+// for 128 MB blocks × a storm of concurrent replications drove the DN to OOM.
+// This version pipes chunks directly from the gRPC stream into WriteBlock so
+// only one chunk is resident at a time.
 func (s *Server) replicateBlock(blockID, sourceAddr string) error {
 	slog.Info("replicating block", "blockID", blockID, "source", sourceAddr)
 
@@ -180,20 +206,33 @@ func (s *Server) replicateBlock(blockID, sourceAddr string) error {
 		return fmt.Errorf("read block for replication: %w", err)
 	}
 
-	var buf bytes.Buffer
-	for {
-		chunk, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("receive chunk for replication: %w", err)
-		}
-		buf.Write(chunk.Data)
-	}
+	pr, pw := io.Pipe()
 
-	_, _, err = s.storage.WriteBlock(blockID, 1, &buf)
-	if err != nil {
+	// Writer goroutine: stream gRPC chunks into the pipe.
+	go func() {
+		for {
+			chunk, recvErr := stream.Recv()
+			if recvErr == io.EOF {
+				pw.Close()
+				return
+			}
+			if recvErr != nil {
+				pw.CloseWithError(fmt.Errorf("receive chunk for replication: %w", recvErr))
+				return
+			}
+			if _, werr := pw.Write(chunk.Data); werr != nil {
+				// Consumer (WriteBlock) closed the pipe early.
+				return
+			}
+		}
+	}()
+
+	// Main goroutine consumes the pipe and writes to local storage.
+	// An error from WriteBlock (or a pipe error propagated from Recv) will
+	// surface here; the goroutine above is guaranteed to exit because Close()
+	// and CloseWithError() terminate the loop.
+	if _, _, err := s.storage.WriteBlock(blockID, 1, pr); err != nil {
+		_ = pr.CloseWithError(err) // ensure writer goroutine sees close
 		return fmt.Errorf("write replicated block: %w", err)
 	}
 
