@@ -164,6 +164,15 @@ func (bm *BlockManager) ProcessBlockReport(nodeID string, reportedBlocks []struc
 
 // AllocateBlock creates a new block and selects DataNodes for its pipeline.
 // Placement policy: pick N different nodes with most available capacity.
+//
+// When fewer DataNodes are alive than the requested replication factor, the
+// block is allocated with DEGRADED replication: pipeline width = alive count,
+// ReplicationTarget = requested. The NN's background re-replication cycle will
+// create the missing replicas once more DNs rejoin. This lets the cluster keep
+// serving writes through transient DN loss, matching Apache Hadoop's behavior.
+// The v2 F7 benchmark (kill a DN mid-write) previously failed here with
+// "not enough DataNodes: need 3, have 2 alive" even when 2 DNs were enough to
+// store the data durably.
 func (bm *BlockManager) AllocateBlock(replication int32, clientAddr string) (*block.Metadata, []string, error) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
@@ -174,13 +183,25 @@ func (bm *BlockManager) AllocateBlock(replication int32, clientAddr string) (*bl
 
 	// Get alive DataNodes sorted by available capacity
 	aliveNodes := bm.getAliveNodesSorted()
-	if int32(len(aliveNodes)) < replication {
-		return nil, nil, fmt.Errorf("not enough DataNodes: need %d, have %d alive",
-			replication, len(aliveNodes))
+	if len(aliveNodes) == 0 {
+		return nil, nil, fmt.Errorf("no DataNodes alive")
+	}
+
+	// Width of the write pipeline: capped at the number of alive nodes.
+	// If this is less than the requested replication, the block starts out
+	// under-replicated and CheckAndReplicateBlocks will restore the target.
+	pipelineWidth := int(replication)
+	if len(aliveNodes) < pipelineWidth {
+		pipelineWidth = len(aliveNodes)
+		slog.Warn("allocating block with degraded replication",
+			"requested", replication,
+			"actual_pipeline", pipelineWidth,
+			"alive_datanodes", len(aliveNodes),
+		)
 	}
 
 	// Select nodes for pipeline (top N by available capacity, all different)
-	selected := aliveNodes[:replication]
+	selected := aliveNodes[:pipelineWidth]
 	pipeline := make([]string, len(selected))
 	locations := make([]string, len(selected))
 	for i, dn := range selected {

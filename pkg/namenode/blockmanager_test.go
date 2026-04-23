@@ -20,12 +20,36 @@ func TestRegisterDataNode(t *testing.T) {
 	}
 }
 
-func TestAllocateBlock_NotEnoughNodes(t *testing.T) {
+func TestAllocateBlock_Degraded(t *testing.T) {
+	// When fewer DNs are alive than requested replication, allocation should
+	// succeed with a degraded pipeline (1 node) rather than failing outright.
+	// Re-replication will restore the target once more DNs rejoin.
 	bm := makeManager(3, 10*time.Second)
 	bm.RegisterDataNode("n1", "host1:9001", 100<<30)
+
+	meta, pipeline, err := bm.AllocateBlock(3, "client")
+	if err != nil {
+		t.Fatalf("expected degraded allocation to succeed with 1 alive DN, got: %v", err)
+	}
+	if len(pipeline) != 1 {
+		t.Errorf("expected pipeline width 1 (the only alive node), got %d", len(pipeline))
+	}
+	if meta.ReplicationTarget != 3 {
+		t.Errorf("ReplicationTarget should retain requested value 3 so re-replication can restore it; got %d", meta.ReplicationTarget)
+	}
+	if !meta.IsUnderReplicated() {
+		t.Error("a degraded-allocated block should be flagged under-replicated so NN schedules repair")
+	}
+}
+
+func TestAllocateBlock_NoAliveNodes(t *testing.T) {
+	// With zero alive DNs, allocation must still fail — there's nowhere to
+	// place even a single replica. The degraded path tolerates reduced
+	// redundancy, not total loss.
+	bm := makeManager(3, 10*time.Second)
 	_, _, err := bm.AllocateBlock(3, "client")
 	if err == nil {
-		t.Fatal("expected error when fewer nodes than replication factor")
+		t.Fatal("expected error when zero DNs alive")
 	}
 }
 
