@@ -72,6 +72,8 @@ Reads are more stable than before (no 277s outliers) — correctness win even wh
 
 F10's percentage looks similar — fewer total attempts this run (slower writes mean fewer fit in 60s). Both percentages reflect the same underlying behavior: 1 in 3-4 write windows catch the rolling restart exactly when no alive DNs satisfy the pipeline timeout.
 
+**Update (post PR #28):** Per-system settle windows were hard-coded at 7s previously, too short for Apache Hadoop's ~30s DN re-registration. With the new 12/15s (mini) and 30/45s (Hadoop) windows, a targeted Hadoop-only F10 re-run returned **12/12 = 100% writes succeeded** (previously 0/23). The mini-Hadoop side benefits less dramatically — it was already re-registering quickly via PR #19's auto-reregister — but the benchmark is now actually measuring the system rather than the script's timing.
+
 ### Sustained load (D1)
 
 | Round | Before fix — worker-3 mem | After all fixes — worker-3 mem |
