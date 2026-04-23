@@ -422,8 +422,30 @@ bench_F9_cascade() {
 bench_F10_rolling_restart() {
   should_run F10 || return 0
   local sys=$1; local tag=$(tag_of $sys); local compose=$(compose_of $sys)
-  local duration=60; [ "$QUICK" = "1" ] && duration=30
-  log ""; log "=== F10: Rolling Restart (${duration}s) ($tag) ==="
+
+  # Settle windows chosen for how long each system needs after a stop/start:
+  #   - mini-Hadoop: heartbeat every 3s, deadNodeTimeout 10s. DN auto
+  #     re-registers on the first heartbeat after restart (PR #19). 12s after
+  #     kill gives NN time to detect dead; 15s after start gives DN time to
+  #     register + send first block report before the next kill.
+  #   - Apache Hadoop: default dfs.heartbeat.interval=3s, but DN re-registration
+  #     + initial block report easily takes 30s. 30s after kill / 45s after
+  #     start keeps the cluster in a consistent enough state between events.
+  # Pre-fix code used 7s across the board regardless of system, which was
+  # enough for neither — v2 F10 returned 7/19 (mini) and 0/23 (hadoop).
+  local settle_after_kill=12
+  local settle_after_start=15
+  if [ "$sys" = "hadoop" ]; then
+    settle_after_kill=30
+    settle_after_start=45
+  fi
+  # Initial runway lets the write loop get rolling before the first kill.
+  local pre_kill=15
+  # 3 stop+start cycles + initial delay + final buffer.
+  local duration=$(( pre_kill + 3 * (settle_after_kill + settle_after_start) + 10 ))
+  [ "$QUICK" = "1" ] && duration=$(( duration / 2 ))
+
+  log ""; log "=== F10: Rolling Restart (${duration}s, settle=${settle_after_kill}/${settle_after_start}s) ($tag) ==="
   mkdir_fn $sys "/bench/v2/f10"
   # Start write loop in background
   local writes_succeeded=0; local writes_attempted=0
@@ -442,31 +464,23 @@ bench_F10_rolling_restart() {
     done
   ) &
   local write_pid=$!
-  # Rolling restart schedule: kill w1 at 15s, restart at 22s; w2 at 30s/37s; w3 at 45s/52s
-  sleep 15
-  log "  Rolling: stop worker-1"
-  docker compose -f "$compose" stop "$(worker_name $sys 1)" > /dev/null 2>&1
-  sleep 7
-  log "  Rolling: start worker-1"
-  docker compose -f "$compose" start "$(worker_name $sys 1)" > /dev/null 2>&1
-  sleep 8
-  log "  Rolling: stop worker-2"
-  docker compose -f "$compose" stop "$(worker_name $sys 2)" > /dev/null 2>&1
-  sleep 7
-  log "  Rolling: start worker-2"
-  docker compose -f "$compose" start "$(worker_name $sys 2)" > /dev/null 2>&1
-  sleep 8
-  log "  Rolling: stop worker-3"
-  docker compose -f "$compose" stop "$(worker_name $sys 3)" > /dev/null 2>&1
-  sleep 7
-  log "  Rolling: start worker-3"
-  docker compose -f "$compose" start "$(worker_name $sys 3)" > /dev/null 2>&1
+
+  sleep "$pre_kill"
+  for i in 1 2 3; do
+    log "  Rolling: stop worker-$i"
+    docker compose -f "$compose" stop "$(worker_name $sys $i)" > /dev/null 2>&1
+    sleep "$settle_after_kill"
+    log "  Rolling: start worker-$i"
+    docker compose -f "$compose" start "$(worker_name $sys $i)" > /dev/null 2>&1
+    sleep "$settle_after_start"
+  done
+
   wait $write_pid 2>/dev/null || true
   sleep 10  # let cluster settle
   writes_succeeded=$(grep -c "^ok$" "$RESULTS_DIR/f10_writes_${tag}.log" 2>/dev/null || echo "0")
   writes_attempted=$(wc -l < "$RESULTS_DIR/f10_writes_${tag}.log" 2>/dev/null | tr -d ' \r\n' || echo "0")
   log "  Writes: $writes_succeeded/$writes_attempted succeeded"
-  echo "succeeded=$writes_succeeded attempted=$writes_attempted" >> "$RESULTS_DIR/f10_rolling_${tag}.txt"
+  echo "succeeded=$writes_succeeded attempted=$writes_attempted settle_kill=$settle_after_kill settle_start=$settle_after_start" >> "$RESULTS_DIR/f10_rolling_${tag}.txt"
 }
 
 # ═══════════════════════════════════════════════════════════
