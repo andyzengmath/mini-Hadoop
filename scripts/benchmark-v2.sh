@@ -195,10 +195,16 @@ bench_L3_concurrent() {
   local sha1=$(sha256_local $sys "/tmp/l3-c1.dat")
   local sha2=$(sha256_local $sys "/tmp/l3-c2.dat")
   local s=$(ts_ms)
+  # Without subshell wrapping: `cmd1 & cmd2 & wait`.
+  # `(cmd &)` runs in a subshell that detaches the child, so the outer wait had
+  # no PIDs to wait for and returned immediately — causing the verify step to
+  # run against files that the put commands had not finished writing. The
+  # result was a spurious 0/2 integrity failure in every prior run on both
+  # systems.
   if [ "$sys" = "mini" ]; then
-    exec_fn $sys "(hdfs put /tmp/l3-c1.dat /bench/v2/l3/c1.dat &) ; (hdfs put /tmp/l3-c2.dat /bench/v2/l3/c2.dat &) ; wait"
+    exec_fn $sys "hdfs put /tmp/l3-c1.dat /bench/v2/l3/c1.dat & hdfs put /tmp/l3-c2.dat /bench/v2/l3/c2.dat & wait"
   else
-    exec_fn $sys "(hdfs dfs -put -f /tmp/l3-c1.dat /bench/v2/l3/c1.dat &) ; (hdfs dfs -put -f /tmp/l3-c2.dat /bench/v2/l3/c2.dat &) ; wait"
+    exec_fn $sys "hdfs dfs -put -f /tmp/l3-c1.dat /bench/v2/l3/c1.dat & hdfs dfs -put -f /tmp/l3-c2.dat /bench/v2/l3/c2.dat & wait"
   fi
   local e=$(ts_ms); local elapsed=$((e-s))
   # Verify both
