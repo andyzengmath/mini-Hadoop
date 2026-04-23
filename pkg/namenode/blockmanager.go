@@ -29,6 +29,21 @@ type BlockCommand struct {
 	SourceNode  string   // For REPLICATE: source address
 }
 
+// pendingReplicationTTL bounds how long a target can sit in a block's
+// PendingLocations without being confirmed by a block report. A DataNode that
+// accepts a REPLICATE command but fails (connection reset, buffer error) never
+// sends a block report for that block, so the target would otherwise be stuck
+// in PendingLocations forever — effectively blacklisted from future
+// re-replication attempts. With the TTL, expired entries are purged so
+// CheckAndReplicateBlocks can schedule a fresh attempt (possibly to a
+// different target if the original DN is still failing).
+//
+// 60s is a balance: long enough to avoid thrashing a slow-but-working DN
+// (default replicateBlock timeout is on the order of a 128MB stream + buffer),
+// short enough that transient failures don't leave a block permanently
+// under-replicated.
+const pendingReplicationTTL = 60 * time.Second
+
 // BlockManager tracks all blocks and their locations across DataNodes.
 type BlockManager struct {
 	mu sync.RWMutex
@@ -42,6 +57,12 @@ type BlockManager struct {
 	// Pending commands per DataNode (sent via next heartbeat)
 	pendingCommands map[string][]BlockCommand // nodeID -> commands
 
+	// pendingReplicationDeadlines[blockID][targetAddr] = deadline.
+	// Populated when CheckAndReplicateBlocks schedules a REPLICATE command.
+	// Purged when ProcessBlockReport confirms the replica, or when the
+	// deadline passes without confirmation (see pendingReplicationTTL).
+	pendingReplicationDeadlines map[string]map[string]time.Time
+
 	// Configuration
 	defaultReplication int32
 	deadNodeTimeout    time.Duration
@@ -50,11 +71,12 @@ type BlockManager struct {
 // NewBlockManager creates a new BlockManager.
 func NewBlockManager(defaultReplication int32, deadNodeTimeout time.Duration) *BlockManager {
 	return &BlockManager{
-		blocks:            make(map[string]*block.Metadata),
-		datanodes:         make(map[string]*DataNodeInfo),
-		pendingCommands:   make(map[string][]BlockCommand),
-		defaultReplication: defaultReplication,
-		deadNodeTimeout:   deadNodeTimeout,
+		blocks:                      make(map[string]*block.Metadata),
+		datanodes:                   make(map[string]*DataNodeInfo),
+		pendingCommands:             make(map[string][]BlockCommand),
+		pendingReplicationDeadlines: make(map[string]map[string]time.Time),
+		defaultReplication:          defaultReplication,
+		deadNodeTimeout:             deadNodeTimeout,
 	}
 }
 
@@ -164,11 +186,43 @@ func (bm *BlockManager) ProcessBlockReport(nodeID string, reportedBlocks []struc
 		if !containsString(meta.Locations, dn.Address) {
 			meta.Locations = append(meta.Locations, dn.Address)
 		}
-		// Confirm pending replication if this address was pending
+		// Confirm pending replication: the block is actually on this DN, so
+		// both the pending list and its deadline are no longer needed.
 		meta.ClearPendingLocation(dn.Address)
+		if deadlines := bm.pendingReplicationDeadlines[rb.BlockID]; deadlines != nil {
+			delete(deadlines, dn.Address)
+			if len(deadlines) == 0 {
+				delete(bm.pendingReplicationDeadlines, rb.BlockID)
+			}
+		}
 	}
 
 	return toDelete
+}
+
+// expireStalePendingLocked clears entries from meta.PendingLocations whose
+// deadline has passed. Must be called with bm.mu held. Called at the top of
+// CheckAndReplicateBlocks so expired pendings don't prevent a retry.
+func (bm *BlockManager) expireStalePendingLocked(blockID string, meta *block.Metadata, now time.Time) {
+	deadlines, ok := bm.pendingReplicationDeadlines[blockID]
+	if !ok || len(deadlines) == 0 {
+		return
+	}
+	kept := meta.PendingLocations[:0]
+	for _, addr := range meta.PendingLocations {
+		deadline, tracked := deadlines[addr]
+		if tracked && now.After(deadline) {
+			slog.Warn("expiring stale pending replication",
+				"blockID", blockID, "target", addr, "age_over", now.Sub(deadline))
+			delete(deadlines, addr)
+			continue
+		}
+		kept = append(kept, addr)
+	}
+	meta.PendingLocations = kept
+	if len(deadlines) == 0 {
+		delete(bm.pendingReplicationDeadlines, blockID)
+	}
 }
 
 // AllocateBlock creates a new block and selects DataNodes for its pipeline.
@@ -275,6 +329,7 @@ func (bm *BlockManager) RemoveBlock(blockID string) {
 	}
 
 	delete(bm.blocks, blockID)
+	delete(bm.pendingReplicationDeadlines, blockID)
 }
 
 // CheckAndReplicateBlocks scans for under-replicated blocks and schedules re-replication.
@@ -283,7 +338,14 @@ func (bm *BlockManager) CheckAndReplicateBlocks() {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
+	now := time.Now()
 	for blockID, meta := range bm.blocks {
+		// Expire stale pending replications. A DN may have accepted a
+		// REPLICATE command but failed (connection reset mid-stream, etc.)
+		// and never sent a block report — without this, the target would
+		// stay in PendingLocations forever, effectively blacklisting it.
+		bm.expireStalePendingLocked(blockID, meta, now)
+
 		// Remove dead node locations
 		aliveLocations := make([]string, 0, len(meta.Locations))
 		for _, addr := range meta.Locations {
@@ -326,8 +388,12 @@ func (bm *BlockManager) CheckAndReplicateBlocks() {
 				TargetNodes: []string{target},
 				SourceNode:  sourceAddr,
 			})
-			// Track as pending — will be confirmed by block report or cleared on failure
+			// Track as pending — confirmed by block report, cleared by TTL if unconfirmed.
 			meta.PendingLocations = append(meta.PendingLocations, target)
+			if bm.pendingReplicationDeadlines[blockID] == nil {
+				bm.pendingReplicationDeadlines[blockID] = make(map[string]time.Time)
+			}
+			bm.pendingReplicationDeadlines[blockID][target] = now.Add(pendingReplicationTTL)
 			slog.Info("scheduled re-replication",
 				"blockID", blockID,
 				"source", sourceAddr,

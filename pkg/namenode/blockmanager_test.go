@@ -92,6 +92,95 @@ func TestAllocateBlock_DefaultReplication(t *testing.T) {
 	}
 }
 
+func TestPendingReplicationTTL_ExpiresStaleEntries(t *testing.T) {
+	// Regression guard for "block permanently under-replicated after a DN
+	// fails mid-replicate". PendingLocations was never cleared on failure —
+	// only on successful block report. After a transient replication failure,
+	// the target stayed blacklisted forever, and if every DN ended up in that
+	// state the block could never recover.
+	//
+	// After this fix: scheduling a REPLICATE stamps a deadline; the next
+	// CheckAndReplicateBlocks call after the deadline expires the entry.
+	bm := makeManager(3, 10*time.Second)
+	bm.RegisterDataNode("n1", "host1:9001", 100<<30)
+	bm.RegisterDataNode("n2", "host2:9001", 100<<30)
+	bm.RegisterDataNode("n3", "host3:9001", 100<<30)
+
+	// Create a block that's under-replicated (only one location).
+	blockID := "blk_ttl_test"
+	meta := block.NewMetadata(3)
+	meta.BlockID = block.ID(blockID)
+	meta.Locations = []string{"host1:9001"}
+	bm.mu.Lock()
+	bm.blocks[blockID] = &meta
+	bm.mu.Unlock()
+
+	// First cycle: CheckAndReplicateBlocks schedules a REPLICATE, stamping
+	// pending-deadline ~= now + pendingReplicationTTL.
+	bm.CheckAndReplicateBlocks()
+
+	bm.mu.RLock()
+	pendingAfterFirst := len(bm.blocks[blockID].PendingLocations)
+	bm.mu.RUnlock()
+	if pendingAfterFirst == 0 {
+		t.Fatal("expected CheckAndReplicateBlocks to schedule a REPLICATE on first cycle")
+	}
+
+	// Simulate the deadline having passed: reach into the deadlines map and
+	// rewind them into the past. A mid-replicate DN failure would match this
+	// state naturally once the TTL elapses.
+	bm.mu.Lock()
+	for addr := range bm.pendingReplicationDeadlines[blockID] {
+		bm.pendingReplicationDeadlines[blockID][addr] = time.Now().Add(-time.Second)
+	}
+	bm.mu.Unlock()
+
+	// Second cycle: expiration should clear the stale pending and schedule a
+	// fresh attempt (which picks a target out of PendingLocations, possibly
+	// the same one — the point is it's no longer blacklisted).
+	bm.CheckAndReplicateBlocks()
+
+	// The block should still be under-replicated (no real DN confirmed), but
+	// a new scheduling attempt should have happened — meaning PendingLocations
+	// has at least one fresh entry, not the original stale one stuck forever.
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+	pendingAfterSecond := len(bm.blocks[blockID].PendingLocations)
+	if pendingAfterSecond == 0 {
+		t.Error("expected re-scheduling after stale pending was expired; got empty PendingLocations")
+	}
+
+	// Deadlines map should have fresh (future) entries, not the stale ones.
+	for addr, deadline := range bm.pendingReplicationDeadlines[blockID] {
+		if !deadline.After(time.Now()) {
+			t.Errorf("pending deadline for %s should be in the future after re-scheduling, got %v", addr, deadline)
+		}
+	}
+}
+
+func TestPendingReplicationTTL_RemoveBlockClearsDeadlines(t *testing.T) {
+	// RemoveBlock should also drop the deadlines map entry; otherwise deleted
+	// blocks would leak into bm.pendingReplicationDeadlines indefinitely.
+	bm := makeManager(3, 10*time.Second)
+	bm.RegisterDataNode("n1", "host1:9001", 100<<30)
+
+	blockID := "blk_remove_test"
+	bm.mu.Lock()
+	bm.blocks[blockID] = &block.Metadata{BlockID: block.ID(blockID), Locations: []string{"host1:9001"}}
+	bm.pendingReplicationDeadlines[blockID] = map[string]time.Time{
+		"host2:9001": time.Now().Add(pendingReplicationTTL),
+	}
+	bm.mu.Unlock()
+
+	bm.RemoveBlock(blockID)
+
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+	if _, exists := bm.pendingReplicationDeadlines[blockID]; exists {
+		t.Error("RemoveBlock must also clear pendingReplicationDeadlines to avoid a slow leak")
+	}
+}
+
 func TestRestore_PreservesLocationsThroughFirstCheckCycle(t *testing.T) {
 	// Regression test for v2 F5 4/5 failure ("no locations for block X" after
 	// NN restart). Restore() must give DNs a grace period as Alive so that
