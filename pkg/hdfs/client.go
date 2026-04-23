@@ -84,7 +84,10 @@ func (c *Client) CreateFile(path string, data io.Reader, replication int32) erro
 	buf := make([]byte, chunkSize)
 
 	for {
-		// Read one block's worth of data
+		// Read one block's worth of data into a byte slice so we can retry the
+		// pipeline if a DN dies mid-stream. Prior code kept data in a
+		// *bytes.Buffer that Read drains once — on a pipeline failure the
+		// second attempt would have seen an empty buffer.
 		blockBuf := &bytes.Buffer{}
 		n, err := io.CopyN(blockBuf, data, blockSize)
 		if n == 0 && err == io.EOF {
@@ -93,33 +96,56 @@ func (c *Client) CreateFile(path string, data io.Reader, replication int32) erro
 		if err != nil && err != io.EOF {
 			return fmt.Errorf("read input data: %w", err)
 		}
+		blockBytes := blockBuf.Bytes()
 
-		// Allocate a block from the NameNode
-		addResp, addErr := c.nnClient.AddBlock(context.Background(), &pb.AddBlockRequest{
-			Path: path,
-		})
-		if addErr != nil {
-			return fmt.Errorf("add block: %w", addErr)
+		// Retry pipeline writes up to maxBlockWriteAttempts. Each attempt
+		// freshly allocates a block + pipeline from the NN so a dead DN
+		// (e.g. from v2 F7 scenario: worker killed mid-write) is excluded
+		// from the next try via AllocateBlock picking only alive nodes.
+		// With degraded allocation from PR #21, even a single surviving DN
+		// is enough to complete the write; NN background re-replication
+		// restores rep-factor.
+		var committedBlockID string
+		var lastErr error
+		for attempt := 1; attempt <= maxBlockWriteAttempts; attempt++ {
+			addResp, addErr := c.nnClient.AddBlock(context.Background(), &pb.AddBlockRequest{
+				Path: path,
+			})
+			if addErr != nil {
+				return fmt.Errorf("add block: %w", addErr)
+			}
+			if addResp.Error != "" {
+				return fmt.Errorf("add block: %s", addResp.Error)
+			}
+
+			blockID := addResp.Block.BlockId
+			pipeline := addResp.Pipeline
+			if len(pipeline) == 0 {
+				return fmt.Errorf("empty pipeline for block %s", blockID)
+			}
+
+			writeErr := c.writeBlockToPipeline(
+				blockID, addResp.Block.GenerationStamp,
+				bytes.NewReader(blockBytes), pipeline, buf,
+			)
+			if writeErr == nil {
+				committedBlockID = blockID
+				slog.Info("block written", "blockID", blockID, "size", n, "pipeline", pipeline, "attempt", attempt)
+				break
+			}
+			lastErr = writeErr
+			slog.Warn("pipeline write failed, retrying with new allocation",
+				"blockID", blockID, "attempt", attempt, "max", maxBlockWriteAttempts, "error", writeErr,
+			)
+			// The previous blockID is now orphaned on the NN — tracked in the
+			// block map but no longer referenced by any file's BlockIDs once
+			// CompleteFile runs with our successful replacement. Orphan
+			// cleanup is a separate concern; see the NN block manager.
 		}
-		if addResp.Error != "" {
-			return fmt.Errorf("add block: %s", addResp.Error)
+		if committedBlockID == "" {
+			return fmt.Errorf("write block after %d attempts: %w", maxBlockWriteAttempts, lastErr)
 		}
-
-		blockID := addResp.Block.BlockId
-		pipeline := addResp.Pipeline
-
-		// Write block through pipeline (first DataNode in pipeline)
-		if len(pipeline) == 0 {
-			return fmt.Errorf("empty pipeline for block %s", blockID)
-		}
-
-		genStamp := addResp.Block.GenerationStamp
-		if writeErr := c.writeBlockToPipeline(blockID, genStamp, blockBuf, pipeline, buf); writeErr != nil {
-			return fmt.Errorf("write block %s: %w", blockID, writeErr)
-		}
-
-		blockIDs = append(blockIDs, blockID)
-		slog.Info("block written", "blockID", blockID, "size", n, "pipeline", pipeline)
+		blockIDs = append(blockIDs, committedBlockID)
 
 		if err == io.EOF {
 			break
@@ -142,8 +168,18 @@ func (c *Client) CreateFile(path string, data io.Reader, replication int32) erro
 	return nil
 }
 
+// maxBlockWriteAttempts is the number of times a client will retry a block
+// write through freshly allocated pipelines. 3 gives enough headroom that a
+// single DN death mid-stream (the v2 F7 scenario) recovers with one retry and
+// a second retry handles a pathological 2-DN race, without masking a truly
+// stuck cluster (all DNs down) with long retry storms.
+const maxBlockWriteAttempts = 3
+
 // writeBlockToPipeline sends block data to the first DataNode in the pipeline.
-func (c *Client) writeBlockToPipeline(blockID string, genStamp int64, data *bytes.Buffer, pipeline []string, chunkBuf []byte) error {
+// data is a *bytes.Reader rather than io.Reader so the caller can hand in a
+// fresh reader for each pipeline retry (bytes.NewReader(blockBytes)) and we
+// retain Len() for last-chunk detection without needing a separate size arg.
+func (c *Client) writeBlockToPipeline(blockID string, genStamp int64, data *bytes.Reader, pipeline []string, chunkBuf []byte) error {
 	conn, err := rpc.Dial(pipeline[0])
 	if err != nil {
 		return fmt.Errorf("connect to DataNode %s: %w", pipeline[0], err)
