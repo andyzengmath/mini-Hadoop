@@ -59,9 +59,16 @@ func NewBlockManager(defaultReplication int32, deadNodeTimeout time.Duration) *B
 }
 
 // Restore loads previously persisted block metadata and DataNode registrations.
-// DataNodes are restored as initially dead — they become alive when their first heartbeat
-// arrives after restart. This avoids incorrectly treating pre-restart addresses as live targets
-// for block allocation before the real DNs have reconnected.
+//
+// DataNodes are restored as Alive with LastHeartbeat reset to now, giving them
+// one full deadNodeTimeout to actually heartbeat before DetectDeadNodes marks
+// them dead. This grace period is necessary because CheckAndReplicateBlocks
+// (which runs every heartbeat tick) strips locations from blocks whose DN is
+// not Alive — without the grace, every block's Locations would be wiped before
+// any DN had a chance to re-register after NN restart, which caused spurious
+// "no locations for block X" errors immediately after restart (observed in
+// v2 F5 as 4/5 SHA match instead of 5/5). If a DN is genuinely dead, it
+// simply won't heartbeat in time and gets marked dead correctly.
 func (bm *BlockManager) Restore(blocks map[string]*block.Metadata, datanodes map[string]*DataNodeInfo) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
@@ -73,9 +80,11 @@ func (bm *BlockManager) Restore(blocks map[string]*block.Metadata, datanodes map
 		}
 	}
 	if datanodes != nil {
+		now := time.Now()
 		for id, dn := range datanodes {
 			copied := *dn
-			copied.Alive = false // wait for heartbeat to confirm liveness
+			copied.Alive = true
+			copied.LastHeartbeat = now
 			bm.datanodes[id] = &copied
 		}
 	}

@@ -3,6 +3,8 @@ package namenode
 import (
 	"testing"
 	"time"
+
+	"github.com/mini-hadoop/mini-hadoop/pkg/block"
 )
 
 func makeManager(replication int32, timeout time.Duration) *BlockManager {
@@ -87,6 +89,46 @@ func TestAllocateBlock_DefaultReplication(t *testing.T) {
 	}
 	if meta.ReplicationTarget != 3 {
 		t.Errorf("expected default replication 3, got %d", meta.ReplicationTarget)
+	}
+}
+
+func TestRestore_PreservesLocationsThroughFirstCheckCycle(t *testing.T) {
+	// Regression test for v2 F5 4/5 failure ("no locations for block X" after
+	// NN restart). Restore() must give DNs a grace period as Alive so that
+	// CheckAndReplicateBlocks, which runs every heartbeat tick, does NOT strip
+	// block locations before DNs have had a chance to re-register. If this
+	// invariant breaks, every block loses its Locations immediately after
+	// restart and reads fail with "no locations for block".
+	bm := makeManager(3, 10*time.Second)
+	blockID := "blk_restore_test"
+	addrs := []string{"host1:9001", "host2:9001", "host3:9001"}
+	meta := block.NewMetadata(3)
+	meta.BlockID = block.ID(blockID)
+	meta.Locations = append([]string{}, addrs...)
+
+	blocks := map[string]*block.Metadata{blockID: &meta}
+	datanodes := map[string]*DataNodeInfo{
+		"n1": {NodeID: "n1", Address: "host1:9001", CapacityBytes: 100 << 30, Alive: true},
+		"n2": {NodeID: "n2", Address: "host2:9001", CapacityBytes: 100 << 30, Alive: true},
+		"n3": {NodeID: "n3", Address: "host3:9001", CapacityBytes: 100 << 30, Alive: true},
+	}
+
+	bm.Restore(blocks, datanodes)
+
+	// Simulate the first heartbeatMonitor tick immediately after restart —
+	// no DN has heartbeated yet, but DNs must still count as alive during
+	// the grace period so locations survive this pass.
+	bm.CheckAndReplicateBlocks()
+
+	bm.mu.RLock()
+	got := bm.blocks[blockID]
+	bm.mu.RUnlock()
+	if got == nil {
+		t.Fatal("block disappeared from BlockManager after Restore")
+	}
+	if len(got.Locations) != 3 {
+		t.Errorf("expected 3 Locations preserved through first replication check (grace period), got %d: %v",
+			len(got.Locations), got.Locations)
 	}
 }
 
