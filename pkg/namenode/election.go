@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -148,9 +149,16 @@ func (le *LeaderElection) Stop() error {
 
 // LocalBackend is a single-node election backend that always wins.
 // Used for development and testing without ZooKeeper.
+//
+// isLeader uses atomic.Bool because Campaign/Resign run on the election
+// goroutine spawned by LeaderElection.Start(), while IsLeader() is read
+// concurrently by callers on other goroutines (e.g. RPC handlers). A plain
+// bool caused the race detector to fire when two servers were started within
+// the same test process (observed during editlog-replay test development).
 type LocalBackend struct {
-	isLeader bool
+	isLeader atomic.Bool
 	done     chan struct{}
+	doneOnce sync.Once
 }
 
 // NewLocalBackend creates a backend that immediately becomes leader.
@@ -161,14 +169,17 @@ func NewLocalBackend() *LocalBackend {
 }
 
 func (b *LocalBackend) Campaign(nodeID string) error {
-	b.isLeader = true
+	b.isLeader.Store(true)
 	slog.Info("local election: immediately became leader", "nodeID", nodeID)
 	return nil
 }
 
 func (b *LocalBackend) Resign() error {
-	b.isLeader = false
-	close(b.done)
+	b.isLeader.Store(false)
+	// close(done) must run at most once; Close() delegates to Resign() so the
+	// same backend can see multiple resigns during shutdown. sync.Once makes
+	// that idempotent.
+	b.doneOnce.Do(func() { close(b.done) })
 	return nil
 }
 
@@ -177,7 +188,7 @@ func (b *LocalBackend) GetLeader() (string, error) {
 }
 
 func (b *LocalBackend) IsLeader() bool {
-	return b.isLeader
+	return b.isLeader.Load()
 }
 
 func (b *LocalBackend) Watch() error {
