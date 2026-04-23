@@ -50,7 +50,14 @@ And the latent D1 memory explosion is fixed: worker memory capped at ~200 MiB vs
 | L2 1GB read | 7.1 MB/s (277s outlier) | 40.8 MB/s (stable) |
 | L3 2×500MB concurrent | 0/2 integrity ❌ | **2/2 ✅** |
 
-Writes regressed ~40% because PR #19's bug #2 fix moved data from ephemeral container layer to actual named volumes on WSL2's virtual disk. Trade-off is correct — correctness over throughput. Reads are more stable than before (no 277s outliers).
+Writes regressed ~40% between runs. Initial hypothesis was "persistent volumes on WSL2 are slower" — but an in-container microbenchmark disproved that: `/data/datanode` (WSL2 named volume) clocked 230 MB/s vs `/tmp` (container writable layer) at 127 MB/s for a 500MB `dd`. The disk is not the bottleneck.
+
+Most likely remaining causes, none investigated to confidence:
+- `mini_exec()` stderr-tee overhead (each CLI fork spawns a subshell process via `tee -a`) adding up across 3 runs × many ops.
+- Docker Desktop / WSL2 host I/O noise — run-to-run variance is high on a dev laptop.
+- Something in the gRPC pipeline path exposed by the sustained-load patterns of v2 that wasn't present in simpler v1 tests.
+
+Reads are more stable than before (no 277s outliers) — correctness win even when throughput is mixed.
 
 ### Fault tolerance (F5-F10)
 
