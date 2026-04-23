@@ -12,11 +12,15 @@ import (
 )
 
 // PersistentState is the JSON-serializable snapshot of NameNode metadata.
+// LastEditSeq is the edit-log sequence number at the moment SaveState ran.
+// Start() uses it to ReplayFrom(LastEditSeq) so edits written after the snapshot
+// but before an ungraceful shutdown are reapplied — otherwise they would be lost.
 type PersistentState struct {
-	Timestamp   time.Time                   `json:"timestamp"`
-	Namespace   *PersistentNamespace        `json:"namespace"`
-	Blocks      map[string]*block.Metadata  `json:"blocks"`
-	DataNodes   map[string]*DataNodeInfo    `json:"datanodes"`
+	Timestamp   time.Time                  `json:"timestamp"`
+	LastEditSeq int64                      `json:"last_edit_seq"`
+	Namespace   *PersistentNamespace       `json:"namespace"`
+	Blocks      map[string]*block.Metadata `json:"blocks"`
+	DataNodes   map[string]*DataNodeInfo   `json:"datanodes"`
 }
 
 // PersistentNamespace is the JSON-serializable namespace tree.
@@ -30,8 +34,10 @@ type PersistentNamespace struct {
 	Permissions int32                          `json:"permissions,omitempty"`
 }
 
-// SaveState writes the NameNode state to a JSON file.
-func SaveState(ns *Namespace, bm *BlockManager, dir string) error {
+// SaveState writes the NameNode state to a JSON file. lastEditSeq should be
+// the current edit-log sequence at save time, so Start() can replay edits
+// logged after this snapshot via ReplayFrom(lastEditSeq).
+func SaveState(ns *Namespace, bm *BlockManager, lastEditSeq int64, dir string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create metadata dir: %w", err)
 	}
@@ -54,10 +60,11 @@ func SaveState(ns *Namespace, bm *BlockManager, dir string) error {
 	bm.mu.RUnlock()
 
 	state := PersistentState{
-		Timestamp: time.Now(),
-		Namespace: pns,
-		Blocks:    blocks,
-		DataNodes: datanodes,
+		Timestamp:   time.Now(),
+		LastEditSeq: lastEditSeq,
+		Namespace:   pns,
+		Blocks:      blocks,
+		DataNodes:   datanodes,
 	}
 
 	data, err := json.MarshalIndent(state, "", "  ")

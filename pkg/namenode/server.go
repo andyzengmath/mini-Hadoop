@@ -2,6 +2,7 @@ package namenode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -44,13 +45,16 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
+	var snapshotSeq int64
 	if state != nil {
 		s.ns = RestoreNamespace(state.Namespace)
 		s.bm.Restore(state.Blocks, state.DataNodes)
+		snapshotSeq = state.LastEditSeq
 		slog.Info("NameNode state restored",
 			"blocks", len(state.Blocks),
 			"datanodes", len(state.DataNodes),
 			"timestamp", state.Timestamp,
+			"snapshot_edit_seq", snapshotSeq,
 		)
 	}
 
@@ -60,6 +64,20 @@ func (s *Server) Start() error {
 		return err
 	}
 	s.editLog = el
+
+	// Replay edits logged after the snapshot was taken.
+	// Snapshots run on graceful shutdown + periodically, but any edit written
+	// after the last snapshot and before an ungraceful crash would be lost
+	// without this step. Replay is idempotent-ish: entries with seq <=
+	// snapshotSeq are filtered by ReplayFrom; entries above are re-applied to
+	// the namespace. Failures during replay log a warning but do not abort
+	// startup — a partial namespace is better than no NameNode.
+	replayed, err := el.ReplayFrom(snapshotSeq, s.applyEditLogEntry)
+	if err != nil {
+		slog.Warn("edit log replay had errors", "error", err, "applied", replayed)
+	} else if replayed > 0 {
+		slog.Info("edit log replayed", "applied", replayed, "from_seq", snapshotSeq)
+	}
 
 	// Initialize leader election (local backend for single-node)
 	backend := NewLocalBackend()
@@ -87,7 +105,7 @@ func (s *Server) Stop() {
 	if s.editLog != nil {
 		s.editLog.Close()
 	}
-	if err := SaveState(s.ns, s.bm, s.cfg.MetadataDir); err != nil {
+	if err := SaveState(s.ns, s.bm, s.editLog.GetSequence(), s.cfg.MetadataDir); err != nil {
 		slog.Error("failed to save state on shutdown", "error", err)
 	}
 	slog.Info("NameNode stopped")
@@ -99,6 +117,54 @@ func (s *Server) logEdit(op EditOp, path string, data interface{}) {
 		if _, err := s.editLog.Append(op, path, data); err != nil {
 			slog.Error("edit log append failed", "op", op, "path", path, "error", err)
 		}
+	}
+}
+
+// applyEditLogEntry reapplies a single edit-log record to the namespace during
+// Start() replay. Runs before the gRPC server is listening so it needs no
+// additional locking beyond what the Namespace type provides internally. Each
+// op mirrors the corresponding RPC handler's state mutation (not its logEdit
+// call — we don't re-log during replay).
+func (s *Server) applyEditLogEntry(entry EditEntry) error {
+	switch entry.Operation {
+	case OpMkDir:
+		// RPC always uses createParents=true (AbsPath handling is inside MkDir).
+		return s.ns.MkDir(entry.Path, true)
+
+	case OpCreateFile:
+		var payload struct {
+			Replication int32 `json:"replication"`
+		}
+		if len(entry.Data) > 0 {
+			if err := json.Unmarshal(entry.Data, &payload); err != nil {
+				slog.Warn("replay: malformed CREATE_FILE payload, skipping", "path", entry.Path, "error", err)
+				return nil
+			}
+		}
+		return s.ns.CreateFile(entry.Path, payload.Replication)
+
+	case OpCompleteFile:
+		var payload struct {
+			Blocks []string `json:"blocks"`
+			Size   int64    `json:"size"`
+		}
+		if err := json.Unmarshal(entry.Data, &payload); err != nil {
+			slog.Warn("replay: malformed COMPLETE_FILE payload, skipping", "path", entry.Path, "error", err)
+			return nil
+		}
+		return s.ns.CompleteFile(entry.Path, payload.Blocks, payload.Size)
+
+	case OpDeleteFile:
+		// Original RPC passes recursive from the request; for replay we assume
+		// recursive=true because by the time a delete was logged the NN had
+		// already decided the operation was legal.
+		_, err := s.ns.Delete(entry.Path, true)
+		return err
+
+	default:
+		// Unknown/unhandled op (e.g. ADD_BLOCK is defined but not currently
+		// logged). Skip silently — replay does not need to know about it.
+		return nil
 	}
 }
 
@@ -131,7 +197,7 @@ func (s *Server) metadataDumper() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := SaveState(s.ns, s.bm, s.cfg.MetadataDir); err != nil {
+			if err := SaveState(s.ns, s.bm, s.editLog.GetSequence(), s.cfg.MetadataDir); err != nil {
 				slog.Error("periodic state dump failed", "error", err)
 			}
 		case <-s.stopCh:

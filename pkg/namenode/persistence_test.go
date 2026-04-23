@@ -17,7 +17,7 @@ func TestSaveAndLoadState_RoundTrip(t *testing.T) {
 	bm := NewBlockManager(3, 10*time.Second)
 	bm.RegisterDataNode("n1", "host1:9001", 100<<30)
 
-	if err := SaveState(ns, bm, dir); err != nil {
+	if err := SaveState(ns, bm, 42, dir); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
 
@@ -27,6 +27,9 @@ func TestSaveAndLoadState_RoundTrip(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("LoadState returned nil")
+	}
+	if state.LastEditSeq != 42 {
+		t.Errorf("expected LastEditSeq=42 (passed to SaveState), got %d — replay would misbehave", state.LastEditSeq)
 	}
 
 	restoredNS := RestoreNamespace(state.Namespace)
@@ -77,7 +80,7 @@ func TestSaveState_DirectoryStructure(t *testing.T) {
 	ns.CompleteFile("/a/file1", []string{"blk_x"}, 512)
 
 	bm := NewBlockManager(2, 10*time.Second)
-	if err := SaveState(ns, bm, dir); err != nil {
+	if err := SaveState(ns, bm, 0, dir); err != nil {
 		t.Fatalf("SaveState: %v", err)
 	}
 
